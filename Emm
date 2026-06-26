@@ -1,0 +1,9 @@
+Laying out what GEPA does and what we're building, since the line between them matters.
+
+GEPA (Genetic-Pareto) optimizes prompts. It reflects in natural language on real execution traces, proposes prompt mutations, and keeps a Pareto frontier of candidates across tasks so it doesn't overfit one metric. Weights are frozen; it runs as an explicit offline pass and emits a static, optimized prompt program. Strength: better agent performance without fine-tuning, and the output is diffable and auditable. Limits: it optimizes the program around a fixed model — no persistent memory, no personalization, no procedural skill accumulation, and no outcome-signal or audit infrastructure of its own.
+
+What we're building is that missing substrate: a central memory and learning engine. Four tiers (working, semantic, episodic, procedural), per-user personalization via recalled preferences, and an offline dreaming loop that turns traces into reusable, human-gated skills — with PII isolation, audit trail, and one-toggle rollback for the regulated context. Drop-in SDK across LangGraph and ADK, zero code change at the call site.
+
+How they fit: dreaming generates the trajectory pool and the outcome signal; GEPA optimizes prompts over that distribution; memory persists what's learned. GEPA is a component inside the loop, not a parallel track — and since we've already worked with it, slotting it in is straightforward.
+
+Deck attached if useful.
