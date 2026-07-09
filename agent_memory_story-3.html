@@ -1,0 +1,886 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>animation vs. agent memory — two stories</title>
+<style>
+  :root{
+    --bg:#0b0f14; --panel:#10161d; --ink:#e6edf3; --dim:#7d8590;
+    --token:#ffb454; --epi:#6cb6ff; --sem:#7ee787; --proc:#d2a8ff;
+    --bad:#ff6b6b; --ok:#7ee787; --user:#8ab4ff;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;background:var(--bg);overflow:hidden}
+  body{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--ink)}
+  #tabbar{
+    height:38px;display:flex;align-items:center;gap:10px;padding:0 14px;
+    background:var(--panel);border-bottom:1px solid #1c232c;font-size:12px;color:var(--dim);user-select:none;
+  }
+  #tabbar .dot{width:9px;height:9px;border-radius:50%}
+  #tabbar .file{color:var(--ink)}
+  #tabbar .file::after{content:" ●";color:var(--token);font-size:9px}
+  #act{margin-left:auto;color:var(--token)}
+  #stage{position:relative;width:100%;height:calc(100% - 38px - 64px)}
+  canvas{display:block;width:100%;height:100%}
+  #caption{
+    height:64px;display:flex;align-items:center;justify-content:space-between;
+    padding:0 18px;background:var(--panel);border-top:1px solid #1c232c;gap:14px;
+  }
+  #cap{font-size:13px;color:#9fb0c0;min-height:1em;flex:1;white-space:pre-wrap}
+  #cap .cm{color:#5b8a5b}
+  #controls{display:flex;align-items:center;gap:10px}
+  .dots{display:flex;gap:6px}
+  .dots button{width:9px;height:9px;border-radius:50%;border:1px solid #3a4653;background:transparent;cursor:pointer;padding:0}
+  .dots button.on{background:var(--token);border-color:var(--token)}
+  #play,#replay{
+    background:transparent;border:1px solid #3a4653;color:var(--ink);
+    font-family:inherit;font-size:12px;padding:5px 12px;border-radius:4px;cursor:pointer;
+  }
+  #play:hover,#replay:hover{border-color:var(--token);color:var(--token)}
+  @media (max-width:640px){ #cap{font-size:11px} }
+</style>
+</head>
+<body>
+<div id="tabbar">
+  <span class="dot" style="background:#ff5f56"></span>
+  <span class="dot" style="background:#ffbd2e"></span>
+  <span class="dot" style="background:#27c93f"></span>
+  <span class="file">&nbsp;agent_memory.demo</span>
+  <span id="act">act 1 — amnesia</span>
+</div>
+<div id="stage"><canvas id="cv"></canvas></div>
+<div id="caption">
+  <div id="cap"></div>
+  <div id="controls">
+    <div class="dots" id="dots"></div>
+    <button id="play">pause</button>
+    <button id="replay">replay</button>
+  </div>
+</div>
+
+<script>
+(() => {
+"use strict";
+const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
+const capEl=document.getElementById('cap'), dotsEl=document.getElementById('dots');
+const playBtn=document.getElementById('play'), replayBtn=document.getElementById('replay');
+const actEl=document.getElementById('act');
+
+let W=0,H=0,DPR=1;
+function resize(){
+  DPR=Math.min(window.devicePixelRatio||1,2);
+  const r=cv.parentElement.getBoundingClientRect();
+  W=r.width; H=r.height; cv.width=W*DPR; cv.height=H*DPR;
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+window.addEventListener('resize',resize); resize();
+const reduced=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+const C={ink:'#e6edf3',dim:'#7d8590',token:'#ffb454',epi:'#6cb6ff',sem:'#7ee787',
+  proc:'#d2a8ff',bad:'#ff6b6b',ok:'#7ee787',user:'#8ab4ff',grid:'rgba(125,133,144,0.07)'};
+
+const lerp=(a,b,t)=>a+(b-a)*t;
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const ease=t=>t<.5?2*t*t:1-Math.pow(-2*t+2,2)/2;
+const easeOut=t=>1-Math.pow(1-t,3);
+const seg=(t,a,b)=>clamp((t-a)/(b-a),0,1);
+
+// ---------- stick figure (col optional; jump: y offset handled by caller) ----------
+function drawAgent(p){
+  const s=p.scale||1, x=p.x, y=p.y;
+  const legLen=26*s, torso=30*s, headR=10*s;
+  const hipY=y-legLen;
+  const bob=Math.sin((p.walk||0)*Math.PI*2)*2*s*(p.walking?1:0);
+  const shY=hipY-torso+bob-(p.shrug||0)*4*s;
+  const lean=p.lean||0, shX=x+lean*8*s;
+  ctx.save();
+  ctx.strokeStyle=p.col||C.ink; ctx.lineWidth=3*s; ctx.lineCap='round';
+  const ph=(p.walk||0)*Math.PI*2;
+  const la=p.walking?Math.sin(ph)*0.6:(p.tuck?0.9:0.12);
+  const ra=p.walking?Math.sin(ph+Math.PI)*0.6:(p.tuck?-0.9:-0.12);
+  ctx.beginPath();
+  ctx.moveTo(x,hipY+bob); ctx.lineTo(x+Math.sin(la)*legLen, p.tuck? hipY+bob+legLen*0.5 : y);
+  ctx.moveTo(x,hipY+bob); ctx.lineTo(x+Math.sin(ra)*legLen, p.tuck? hipY+bob+legLen*0.5 : y);
+  ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x,hipY+bob); ctx.lineTo(shX,shY); ctx.stroke();
+  const armLen=22*s;
+  const aL=(p.armL!==undefined?p.armL:0.25)+(p.walking?Math.sin(ph+Math.PI)*0.4:0);
+  const aR=(p.armR!==undefined?p.armR:-0.25)+(p.walking?Math.sin(ph)*0.4:0);
+  ctx.beginPath();
+  ctx.moveTo(shX,shY); ctx.lineTo(shX+Math.sin(aL)*armLen, shY+Math.cos(aL)*armLen);
+  ctx.moveTo(shX,shY); ctx.lineTo(shX+Math.sin(aR)*armLen, shY+Math.cos(aR)*armLen);
+  ctx.stroke();
+  const hx=shX+(p.headTilt||0)*4*s, hy=shY-headR-4*s;
+  ctx.beginPath(); ctx.arc(hx,hy,headR,0,Math.PI*2); ctx.stroke();
+  ctx.fillStyle=p.col||C.ink;
+  const eyeY=hy-1*s, mood=p.mood||0;
+  ctx.beginPath(); ctx.arc(hx-3.4*s,eyeY,1.3*s,0,7); ctx.arc(hx+3.4*s,eyeY,1.3*s,0,7); ctx.fill();
+  if(mood>0.3){ ctx.beginPath(); ctx.arc(hx,hy+3*s,3.5*s,0.15*Math.PI,0.85*Math.PI); ctx.stroke(); }
+  if(mood<-0.3){ ctx.beginPath(); ctx.arc(hx,hy+7*s,3.5*s,1.15*Math.PI,1.85*Math.PI); ctx.stroke(); }
+  ctx.restore();
+  return {shX,shY,headX:hx,headY:hy};
+}
+
+function roundRect(x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+}
+
+function drawToken(t){
+  ctx.save(); ctx.globalAlpha=clamp(t.a,0,1);
+  ctx.translate(t.x,t.y); ctx.rotate(t.rot||0);
+  const w=t.w||34,h=20;
+  ctx.fillStyle=t.fill||'rgba(255,180,84,0.13)';
+  ctx.strokeStyle=t.col||C.token; ctx.lineWidth=1.4;
+  roundRect(-w/2,-h/2,w,h,5); ctx.fill(); ctx.stroke();
+  ctx.fillStyle=t.col||C.token; ctx.font='11px ui-monospace,monospace';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(t.g,0,1); ctx.restore();
+}
+
+function drawContext(cx,cy,wid,label,fillFrac,flash){
+  ctx.save(); ctx.strokeStyle=flash?C.bad:'#3a4653'; ctx.lineWidth=2;
+  const h=34;
+  ctx.beginPath();
+  ctx.moveTo(cx-wid/2+10,cy-h/2); ctx.lineTo(cx-wid/2,cy-h/2); ctx.lineTo(cx-wid/2,cy+h/2); ctx.lineTo(cx-wid/2+10,cy+h/2);
+  ctx.moveTo(cx+wid/2-10,cy-h/2); ctx.lineTo(cx+wid/2,cy-h/2); ctx.lineTo(cx+wid/2,cy+h/2); ctx.lineTo(cx+wid/2-10,cy+h/2);
+  ctx.stroke();
+  if(fillFrac>0){ ctx.fillStyle='rgba(255,180,84,0.08)';
+    ctx.fillRect(cx-wid/2+4,cy-h/2+4,(wid-8)*clamp(fillFrac,0,1),h-8); }
+  ctx.fillStyle=C.dim; ctx.font='10px ui-monospace,monospace'; ctx.textAlign='center';
+  ctx.fillText(label,cx,cy-h/2-8); ctx.restore();
+}
+
+function drawVault(vx,vy,w,rise,counts,hi){ // hi: tier name to highlight
+  const h=150*rise; if(rise<=0) return null;
+  const top=vy-h;
+  ctx.save(); ctx.globalAlpha=clamp(rise*1.4,0,1);
+  ctx.fillStyle='rgba(16,22,29,0.85)'; roundRect(vx-w/2,top,w,h,8); ctx.fill();
+  ctx.strokeStyle='#3a4653'; ctx.lineWidth=2; roundRect(vx-w/2,top,w,h,8); ctx.stroke();
+  const rows=[['episodic',C.epi,counts.epi,'epi'],['semantic',C.sem,counts.sem,'sem'],['procedural',C.proc,counts.proc,'proc']];
+  const rh=h/3;
+  rows.forEach((r,i)=>{
+    const ry=top+rh*i;
+    if(i>0){ ctx.beginPath(); ctx.moveTo(vx-w/2,ry); ctx.lineTo(vx+w/2,ry); ctx.strokeStyle='#242e39'; ctx.stroke(); }
+    if(hi===r[3]){ ctx.fillStyle=r[1]; ctx.globalAlpha=0.08*rise; ctx.fillRect(vx-w/2+2,ry+1,w-4,rh-2); ctx.globalAlpha=clamp(rise*1.4,0,1); }
+    ctx.fillStyle=r[1]; ctx.font='10px ui-monospace,monospace'; ctx.textAlign='left';
+    ctx.fillText(r[0],vx-w/2+10,ry+14);
+    for(let k=0;k<r[2];k++){
+      ctx.beginPath(); ctx.arc(vx-w/2+18+k*16,ry+rh-13,5,0,7);
+      ctx.fillStyle=r[1]; ctx.fill();
+    }
+  });
+  ctx.fillStyle=C.dim; ctx.font='10px ui-monospace,monospace'; ctx.textAlign='center';
+  ctx.fillText('memory_layer',vx,top-8);
+  ctx.restore();
+  return {top,rh,left:vx-w/2,w};
+}
+
+function drawGate(gx,gy,stamp,label){
+  ctx.save(); ctx.strokeStyle='#3a4653'; ctx.lineWidth=2;
+  ctx.beginPath();
+  ctx.moveTo(gx-16,gy-46); ctx.lineTo(gx-16,gy);
+  ctx.moveTo(gx+16,gy-46); ctx.lineTo(gx+16,gy);
+  ctx.moveTo(gx-24,gy-46); ctx.lineTo(gx+24,gy-46);
+  ctx.stroke();
+  ctx.fillStyle=C.dim; ctx.font='10px ui-monospace,monospace'; ctx.textAlign='center';
+  ctx.fillText(label||'governance_gate',gx,gy-56);
+  if(stamp){
+    const drop=easeOut(clamp(stamp.t*2,0,1));
+    const sy=gy-46+drop*18;
+    ctx.strokeStyle=stamp.ok?C.ok:C.bad; ctx.lineWidth=2.4;
+    ctx.beginPath(); ctx.moveTo(gx-10,sy); ctx.lineTo(gx+10,sy); ctx.stroke();
+    if(stamp.t>0.5){
+      ctx.fillStyle=stamp.ok?C.ok:C.bad; ctx.font='bold 13px ui-monospace,monospace';
+      ctx.fillText(stamp.ok?'✓':'✗',gx,sy+16);
+    }
+  }
+  ctx.restore();
+}
+
+function drawWall(wx,gy,label,openFrac){
+  // task obstacle: pillar with a bug stripe; openFrac slides a door open
+  const w=54,h=96;
+  ctx.save();
+  ctx.fillStyle='rgba(255,107,107,0.06)';
+  ctx.strokeStyle='#5a3a3a'; ctx.lineWidth=2;
+  const gap=(openFrac||0)*h;
+  roundRect(wx-w/2,gy-h,w,h-gap>2?h:h,6);
+  // draw as solid block that rises when open
+  ctx.translate(0,-gap);
+  roundRect(wx-w/2,gy-h,w,h,6); ctx.fill(); ctx.stroke();
+  ctx.fillStyle=C.bad; ctx.font='10px ui-monospace,monospace'; ctx.textAlign='center';
+  ctx.fillText('⚠ bug',wx,gy-h+18);
+  ctx.translate(0,gap);
+  ctx.fillStyle=C.dim; ctx.font='10px ui-monospace,monospace';
+  ctx.fillText(label,wx,gy-h-10-gap);
+  ctx.restore();
+}
+
+function attemptMeter(x,y,marks){ // marks: array of 'x','ok',null
+  ctx.save(); ctx.font='12px ui-monospace,monospace'; ctx.textAlign='left';
+  ctx.fillStyle=C.dim; ctx.fillText('attempts:',x,y);
+  marks.forEach((m,i)=>{
+    const mx=x+82+i*26;
+    if(m==='x'){ ctx.fillStyle=C.bad; ctx.fillText('✗',mx,y); }
+    else if(m==='ok'){ ctx.fillStyle=C.ok; ctx.fillText('✓',mx,y); }
+    else { ctx.fillStyle='#2a333d'; ctx.fillText('·',mx,y); }
+  });
+  ctx.restore();
+}
+
+function bubble(x,y,text,col){
+  ctx.save();
+  ctx.font='11px ui-monospace,monospace';
+  const w=ctx.measureText(text).width+16;
+  ctx.fillStyle='rgba(16,22,29,0.9)'; ctx.strokeStyle=col||'#3a4653'; ctx.lineWidth=1.4;
+  roundRect(x-w/2,y-24,w,20,5); ctx.fill(); ctx.stroke();
+  ctx.fillStyle=col||C.ink; ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(text,x,y-14);
+  ctx.restore();
+}
+
+let lineSeed=[];
+function drawBg(){
+  ctx.fillStyle='#0b0f14'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle=C.grid; ctx.font='11px ui-monospace,monospace'; ctx.textAlign='right';
+  if(lineSeed.length===0){ for(let i=0;i<80;i++) lineSeed.push(20+Math.floor(Math.random()*160)); }
+  const lines=Math.floor(H/22);
+  for(let i=0;i<lines;i++){
+    ctx.fillText(String(i+1).padStart(3,' '),34,20+i*22);
+    ctx.fillRect(48,14+i*22,lineSeed[i%80]*0.6,7);
+  }
+  const gy=groundY();
+  ctx.strokeStyle='#1c232c'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(0,gy); ctx.lineTo(W,gy); ctx.stroke();
+}
+function groundY(){ return H*0.78; }
+
+let capTarget='',capShown='',capTimer=0;
+function setCap(s){ if(s!==capTarget){capTarget=s;capShown='';capTimer=0;} }
+function tickCap(dt){
+  if(capShown.length<capTarget.length){
+    capTimer+=dt;
+    const n=reduced?capTarget.length:Math.floor(capTimer/14);
+    capShown=capTarget.slice(0,Math.max(capShown.length,Math.min(n,capTarget.length)));
+  }
+  capEl.innerHTML='<span class="cm">'+escapeHtml(capShown)+'</span>'+(capShown.length<capTarget.length?'▍':'');
+}
+function escapeHtml(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;');}
+
+// ---------- shared state ----------
+let tokens=[],orbs=[],counts={epi:0,sem:0,proc:0};
+function resetScratch(){tokens=[];orbs=[];}
+const PREFS=[{g:'terse',w:46},{g:'python',w:54},{g:'no-slides',w:70}];
+
+// ============================ SCENES ============================
+const SCENES=[
+
+// ---- 0: boot ----
+{ dur:7.5, act:'act 1 — amnesia',
+  enter(){resetScratch();},
+  run(t){
+    setCap('// meet the agent. everything it knows lives in one context window.');
+    const gy=groundY();
+    const walkIn=seg(t,0.2,3.0);
+    const ax=lerp(-60,W*0.42,easeOut(walkIn));
+    drawAgent({x:ax,y:gy,walk:(t*1.6)%1,walking:walkIn<1,mood:0.4});
+    const app=seg(t,3.2,4.4);
+    if(app>0) drawContext(ax,gy-140,lerp(10,220,ease(app)),'context_window',0,false);
+  }
+},
+
+// ---- 1: amnesia ----
+{ dur:12, act:'act 1 — amnesia',
+  enter(){resetScratch(); this.spawned=0;},
+  run(t,dt){
+    const gy=groundY(),ax=W*0.42,cx=ax,cy=gy-140,wid=220;
+    if(t<4.5) setCap('// within a session it looks brilliant: it reads, reasons, answers.');
+    else setCap('// then the session ends. every token evaporates. total amnesia.');
+    if(t<3.5 && this.spawned<9 && t>0.3+this.spawned*0.36){
+      this.spawned++;
+      tokens.push({x:-30,y:gy-200-Math.random()*60,tx:cx-wid/2+22+((this.spawned-1)%9)*22,ty:cy,
+        g:['fn','{}','if','=>','let','db','api','q?','ctx'][this.spawned-1],a:1,w:20});
+    }
+    const evap=5.0;
+    tokens.forEach(tok=>{
+      if(t<evap){ tok.x=lerp(tok.x,tok.tx,1-Math.pow(0.02,dt)); tok.y=lerp(tok.y,tok.ty,1-Math.pow(0.02,dt)); }
+      else{ tok.vy=(tok.vy||0)-30*dt; tok.y+=tok.vy*dt; tok.x+=Math.sin(tok.y*0.05)*0.6;
+        tok.a-=dt*0.5; tok.rot=(tok.rot||0)+dt*1.2; }
+      if(tok.a>0) drawToken(tok);
+    });
+    const fill=t<evap?clamp(this.spawned/9,0,1):Math.max(0,1-seg(t,evap,evap+1.5));
+    drawContext(cx,cy,wid,'context_window',fill,false);
+    if(t>evap-0.4&&t<evap+0.2){
+      ctx.fillStyle='rgba(255,107,107,0.06)'; ctx.fillRect(0,0,W,H);
+      ctx.fillStyle=C.bad; ctx.font='12px ui-monospace,monospace'; ctx.textAlign='center';
+      ctx.fillText('SESSION_END',cx,cy-60);
+    }
+    const sad=seg(t,evap+0.5,evap+1.4);
+    const shrug=t>evap+1.6?Math.sin(seg(t,evap+1.6,evap+3.0)*Math.PI):0;
+    drawAgent({x:ax,y:gy,mood:lerp(0.4,-0.8,sad),shrug,
+      armL:lerp(0.3,1.1,shrug),armR:lerp(-0.3,-1.1,shrug),headTilt:sad*0.6});
+  }
+},
+
+// ---- 2: PERSONALIZATION — the problem ----
+{ dur:18, act:'act 2 — personalization: problem',
+  enter(){resetScratch(); this.sent=0; this.sent2=0;},
+  run(t,dt){
+    const gy=groundY(), ax=W*0.32, ux=W*0.68;
+    const cx=ax, cy=gy-140, wid=210;
+    if(t<4.5) setCap('// day 1: the user teaches the agent who they are.');
+    else if(t<8.5) setCap('// session ends. the preferences evaporate with everything else.');
+    else if(t<13) setCap('// day 2: the user types the exact same things. again.');
+    else setCap('// day 30: the user stops typing. personalization that resets is not personalization.');
+
+    const evap=6.0, day2=8.5;
+    // day label
+    ctx.fillStyle=C.dim; ctx.font='11px ui-monospace,monospace'; ctx.textAlign='left';
+    ctx.fillText(t<day2?'// day 1':'// day 2',60,60);
+
+    // user sends prefs (day 1)
+    if(t>1&&t<4.5&&this.sent<3&&t>1+this.sent*1.0){
+      const p=PREFS[this.sent]; this.sent++;
+      tokens.push({x:ux-30,y:gy-110,tx:cx-wid/2+40+(this.sent-1)*62,ty:cy,g:p.g,w:p.w,a:1,day:1});
+    }
+    // user re-sends prefs (day 2)
+    if(t>day2+0.8&&this.sent2<3&&t>day2+0.8+this.sent2*1.0){
+      const p=PREFS[this.sent2]; this.sent2++;
+      tokens.push({x:ux-30,y:gy-110,tx:cx-wid/2+40+(this.sent2-1)*62,ty:cy,g:p.g,w:p.w,a:1,day:2});
+    }
+    tokens.forEach(tok=>{
+      const dead1 = tok.day===1 && t>=evap;
+      if(!dead1){ tok.x=lerp(tok.x,tok.tx,1-Math.pow(0.02,dt)); tok.y=lerp(tok.y,tok.ty,1-Math.pow(0.02,dt)); }
+      else{ tok.vy=(tok.vy||0)-30*dt; tok.y+=tok.vy*dt; tok.a-=dt*0.6; tok.rot=(tok.rot||0)+dt; }
+      if(tok.a>0) drawToken(tok);
+    });
+    const inCtx=tokens.filter(k=>k.a>0&&((k.day===1&&t<evap)||k.day===2)).length;
+    drawContext(cx,cy,wid,'context_window',clamp(inCtx/3,0,1),false);
+    if(t>evap-0.4&&t<evap+0.2){
+      ctx.fillStyle='rgba(255,107,107,0.06)'; ctx.fillRect(0,0,W,H);
+      ctx.fillStyle=C.bad; ctx.font='12px ui-monospace,monospace'; ctx.textAlign='center';
+      ctx.fillText('SESSION_END',cx,cy-60);
+    }
+    // agent
+    const knows1 = t>4&&t<evap, knows2=t>day2+4;
+    drawAgent({x:ax,y:gy,mood:knows1||knows2?0.6:(t>evap&&t<day2?-0.5:0)});
+    if(knows1) bubble(ax,gy-176,'got it: terse, python',C.ok);
+    if(t>evap+0.6&&t<day2) bubble(ax,gy-176,'who are you?',C.bad);
+    // user
+    const typing=(t>1&&t<4.5)||(t>day2+0.8&&t<day2+3.8);
+    const annoyed=seg(t,day2+3.5,day2+5.5);
+    drawAgent({x:ux,y:gy,col:C.user,mood:lerp(0.2,-0.9,annoyed),
+      armL:typing?1.3:0.3,armR:typing?-1.3:-0.3,headTilt:-annoyed*0.5});
+    ctx.fillStyle=C.user; ctx.font='10px ui-monospace,monospace'; ctx.textAlign='center';
+    ctx.fillText('user',ux,gy-96);
+    if(annoyed>0.5){
+      ctx.fillStyle=C.bad; ctx.font='20px ui-monospace,monospace';
+      ctx.globalAlpha=0.5+0.4*Math.sin(t*5);
+      ctx.fillText('!',ux+22,gy-116); ctx.globalAlpha=1;
+    }
+  }
+},
+
+// ---- 3: PERSONALIZATION — the fix ----
+{ dur:19, act:'act 2 — personalization: fix',
+  enter(){resetScratch(); counts={epi:0,sem:0,proc:0}; this.phase=0; this.pulled=0;},
+  run(t,dt){
+    const gy=groundY(), ax=W*0.28, ux=W*0.52, vx=W*0.80;
+    const cx=ax, cy=gy-140, wid=200, vw=Math.min(215,W*0.26);
+    if(t<4.5) setCap('// the fix: when context dies, do not let the signal die with it.');
+    else if(t<9) setCap('// semantic memory: who the user is. episodic memory: what happened with them.');
+    else if(t<12.5) setCap('// day 2, new session: recall fires before the user finishes saying hello.');
+    else setCap('// the user repeats nothing. the agent already knows. that is personalization.');
+
+    const rise=ease(seg(t,0.5,1.8));
+    const vault=drawVault(vx,gy,vw,rise,counts, t<9?'sem':'epi');
+
+    // phase A: extract prefs from dying session (t 2..6)
+    if(t>2.2 && this.phase===0){
+      this.phase=1;
+      PREFS.forEach((p,i)=>orbs.push({x:cx-wid/2+40+i*62,y:cy,tier:'sem',col:C.sem,row:1,state:'toVault',delay:i*0.5,t0:t}));
+      orbs.push({x:cx,y:cy-30,tier:'epi',col:C.epi,row:0,state:'toVault',delay:1.8,t0:t,label:'session#1'});
+    }
+    orbs.forEach(o=>{
+      if(o.state==='toVault'&&vault&&t>o.t0+o.delay){
+        const ty=vault.top+vault.rh*o.row+vault.rh-13;
+        const tx=vault.left+18+counts[o.tier]*16;
+        const k=1-Math.pow(0.012,dt);
+        o.x=lerp(o.x,tx,k); o.y=lerp(o.y,ty,k);
+        if(Math.abs(o.x-tx)<3&&Math.abs(o.y-ty)<3){o.state='stored';counts[o.tier]=Math.min(counts[o.tier]+1,11);}
+      }
+      if(o.state==='toVault'){
+        ctx.beginPath(); ctx.arc(o.x,o.y,6,0,7);
+        ctx.fillStyle=o.col; ctx.shadowColor=o.col; ctx.shadowBlur=10; ctx.fill(); ctx.shadowBlur=0;
+        if(o.label) bubble(o.x,o.y-10,o.label,C.epi);
+      }
+    });
+
+    // phase B: new session (t>=8.5) — pull sem+epi into context
+    const newS=8.5;
+    if(t>newS-0.3&&t<newS+0.2){
+      ctx.fillStyle='rgba(126,231,135,0.05)'; ctx.fillRect(0,0,W,H);
+      ctx.fillStyle=C.ok; ctx.font='12px ui-monospace,monospace'; ctx.textAlign='center';
+      ctx.fillText('NEW_SESSION — day 2',cx,cy-60);
+    }
+    if(vault&&t>newS+0.5&&this.pulled<3&&t>newS+0.5+this.pulled*0.9){
+      const tier=this.pulled<2?'sem':'epi';
+      const row=tier==='sem'?1:0;
+      counts[tier]=Math.max(0,counts[tier]-1);
+      orbs.push({x:vault.left+18+counts[tier]*16,y:vault.top+vault.rh*row+vault.rh-13,
+        col:tier==='sem'?C.sem:C.epi,slot:this.pulled,state:'recall'});
+      this.pulled++;
+    }
+    let landed=0;
+    orbs.forEach(o=>{
+      if(o.state==='recall'){
+        const tx=cx-wid/2+40+o.slot*56,ty=cy;
+        const k=1-Math.pow(0.015,dt);
+        o.x=lerp(o.x,tx,k); o.y=lerp(o.y,ty,k);
+        if(Math.abs(o.x-tx)<3) o.state='landed';
+      }
+      if(o.state==='recall'||o.state==='landed'){
+        if(o.state==='landed')landed++;
+        ctx.beginPath(); ctx.arc(o.x,o.y,7,0,7);
+        ctx.fillStyle=o.col; ctx.shadowColor=o.col; ctx.shadowBlur=12; ctx.fill(); ctx.shadowBlur=0;
+      }
+    });
+    drawContext(cx,cy,wid, t<newS?'context_window (ending)':'context_window (fresh)', landed/6, false);
+
+    // agent + user
+    const greet=landed===3;
+    drawAgent({x:ax,y:gy,mood:greet?1:0.3, armR:greet?-2.4:-0.3});
+    if(greet) bubble(ax,gy-176,'hi again — terse + python, right?',C.ok);
+    if(t>newS){
+      const uin=easeOut(seg(t,newS,newS+1.6));
+      const uxx=lerp(W+50,ux,uin);
+      const happy=seg(t,newS+4.5,newS+6);
+      drawAgent({x:uxx,y:gy,col:C.user,walking:uin<1,walk:(t*1.8)%1,mood:lerp(0.1,1,happy)});
+      ctx.fillStyle=C.user; ctx.font='10px ui-monospace,monospace'; ctx.textAlign='center';
+      ctx.fillText('user',uxx,gy-96);
+      if(happy>0.6) bubble(uxx,gy-176,'…it remembers me',C.user);
+    }
+  }
+},
+
+// ---- 4: SELF-IMPROVEMENT — the problem ----
+{ dur:16, act:'act 3 — self-improvement: problem',
+  enter(){resetScratch(); this.attempt=1; this.bonked=false; this.marks=[null,null,null];},
+  run(t,dt){
+    const gy=groundY(), wx=W*0.62;
+    if(t<4.5) setCap('// new job for the agent: run this deployment. there is a bug in its playbook.');
+    else if(t<8.5) setCap('// it fails. session ends. the failure — and everything learned from it — evaporates.');
+    else setCap('// attempt #2 is identical to attempt #1. every session is the first day on the job.');
+
+    // two attempts: t windows [0..6] and [7.5..13.5]
+    const local = t<7 ? t : t-7.5;
+    const attempt = t<7 ? 1 : 2;
+    if(attempt===2 && this.attempt===1){ this.attempt=2; this.bonked=false; }
+    ctx.fillStyle=C.dim; ctx.font='11px ui-monospace,monospace'; ctx.textAlign='left';
+    ctx.fillText('// attempt #'+attempt,60,60);
+
+    drawWall(wx,gy,'task: prod_deploy',0);
+    // agent runs at wall, bonks, recoils
+    const runT=seg(local,0.8,2.6);
+    const hitX=wx-42;
+    let axx=lerp(W*0.16,hitX,easeOut(runT));
+    let mood=0.2, leanV=0, armL=0.3, armR=-0.3;
+    if(runT>=1&&!this.bonked){ this.bonked=true; this.marks[attempt-1]='x'; }
+    if(this.bonked&&((attempt===1&&t<7)||(attempt===2))){
+      const rec=seg(local,2.6,3.4);
+      axx=lerp(hitX,hitX-46,easeOut(rec));
+      mood=-0.9; leanV=-0.6*rec; armL=1.2; armR=1.0;
+      if(rec>0.2){
+        ctx.fillStyle=C.bad; ctx.font='bold 16px ui-monospace,monospace'; ctx.textAlign='center';
+        ctx.globalAlpha=0.6+0.4*Math.sin(t*8);
+        ctx.fillText('✗ FAILED',wx,gy-130); ctx.globalAlpha=1;
+      }
+    }
+    drawAgent({x:axx,y:gy,walking:runT<1&&runT>0,walk:(t*2.6)%1,mood,lean:leanV,armL,armR});
+    // session end between attempts
+    if(t>6.2&&t<7.0){
+      ctx.fillStyle='rgba(255,107,107,0.06)'; ctx.fillRect(0,0,W,H);
+      ctx.fillStyle=C.bad; ctx.font='12px ui-monospace,monospace'; ctx.textAlign='center';
+      ctx.fillText('SESSION_END — lesson evaporated',W*0.4,gy-190);
+    }
+    attemptMeter(60,90,this.marks);
+  }
+},
+
+// ---- 5: SELF-IMPROVEMENT — the fix ----
+{ dur:21, act:'act 3 — self-improvement: fix',
+  enter(){resetScratch(); this.marks=['x','x',null]; this.skillStored=false; this.recalled=false;
+    this.stamp=null; this.orb=null; this.jumpT=-1;},
+  run(t,dt){
+    const gy=groundY(), vw=Math.min(200,W*0.24);
+    const vx=W-24-vw/2, vaultLeft=vx-vw/2;
+    const wx=Math.min(W*0.60, vaultLeft-130);
+    const gx=(wx+40+vaultLeft)/2;
+    if(t<4.5) setCap('// the fix: before the session dies, reflect. what failed? what would work?');
+    else if(t<8.5) setCap('// the trajectory compresses into a skill — procedural memory. gated, then stored.');
+    else if(t<13) setCap('// attempt #3: recall the skill first. same agent, different playbook.');
+    else setCap('// it clears the task. failures became training data. that is a self-improving agent.');
+
+    const vault=drawVault(vx,gy,vw,1,counts,'proc');
+    drawWall(wx,gy,'task: prod_deploy', this.jumpT>=0?0:0);
+    attemptMeter(60,90,this.marks);
+    ctx.fillStyle=C.dim; ctx.font='11px ui-monospace,monospace'; ctx.textAlign='left';
+    ctx.fillText(t<8.5?'// post-mortem':'// attempt #3',60,60);
+
+    // phase A: reflection (t 1..4): failure trace tokens condense into proc orb
+    if(t>1&&t<3.5&&tokens.length<4&&t>1+tokens.length*0.5){
+      tokens.push({x:W*0.2+tokens.length*40,y:gy-190,g:['ran','hit','err','why'][tokens.length],a:1,w:34});
+    }
+    const condense=seg(t,3.5,4.6);
+    tokens.forEach(tok=>{
+      if(condense>0){
+        tok.x=lerp(tok.x,W*0.3,condense*0.2); tok.y=lerp(tok.y,gy-170,condense*0.2);
+        tok.a=1-condense;
+      }
+      if(tok.a>0) drawToken(tok);
+    });
+    if(condense>=1&&!this.orb){
+      this.orb={x:W*0.3,y:gy-170,state:'toGate'};
+    }
+    // orb → gate → vault
+    if(this.orb){
+      const o=this.orb;
+      if(o.state==='toGate'){
+        const k=1-Math.pow(0.012,dt);
+        o.x=lerp(o.x,gx,k); o.y=lerp(o.y,gy-24,k);
+        if(Math.abs(o.x-gx)<3){o.state='judge';o.jt=0;this.stamp={t:0,ok:true};}
+      } else if(o.state==='judge'){
+        o.jt+=dt;
+        this.stamp.t = o.jt<1.2 ? clamp(o.jt/1.2,0,1) : 1-seg(o.jt,1.5,2.0);
+        if(o.jt>1.5&&o.state==='judge') o.state='toVault';
+        if(o.jt>2.0) this.stamp=null;
+      } else if(this.stamp&&o.state==='toVault'){
+        o.jt+=dt; this.stamp.t=1-seg(o.jt,1.5,2.0);
+        if(o.jt>2.0) this.stamp=null;
+      }
+      if(o.state==='toVault'&&vault){
+        const ty=vault.top+vault.rh*2+vault.rh-13;
+        const tx=vault.left+18+counts.proc*16;
+        const k=1-Math.pow(0.012,dt);
+        o.x=lerp(o.x,tx,k); o.y=lerp(o.y,ty,k);
+        if(Math.abs(o.x-tx)<3){o.state='stored';counts.proc=Math.min(counts.proc+1,11);this.skillStored=true;}
+      } else if(o.state==='recall'){
+        const tx=W*0.18, ty=gy-170;
+        const k=1-Math.pow(0.015,dt);
+        o.x=lerp(o.x,tx,k); o.y=lerp(o.y,ty,k);
+        if(Math.abs(o.x-tx)<3){o.state='inCtx';this.recalled=true;}
+      }
+      if(o.state!=='stored'||o.state==='inCtx'){
+        if(o.state!=='stored'){
+          ctx.beginPath(); ctx.arc(o.x,o.y,7,0,7);
+          ctx.fillStyle=C.proc; ctx.shadowColor=C.proc; ctx.shadowBlur=12; ctx.fill(); ctx.shadowBlur=0;
+          if(o.state==='toGate'||o.state==='judge') bubble(o.x,o.y-12,'skill: patch config first',C.proc);
+          if(o.state==='inCtx') bubble(o.x,o.y-12,'recalled skill',C.proc);
+        }
+      }
+    }
+    drawGate(gx,gy,this.stamp,'gate');
+    // trigger recall at t=9
+    if(t>9&&this.skillStored&&this.orb.state==='stored'){
+      counts.proc=Math.max(0,counts.proc-1);
+      this.orb={x:vault.left+18+counts.proc*16,y:vault.top+vault.rh*2+vault.rh-13,state:'recall'};
+      this.skillStored=false; // consumed
+    }
+    // phase B: attempt #3 with jump
+    let axx=W*0.16, ay=gy, mood=0.2, tuck=false, walking=false;
+    if(this.recalled){
+      if(this.jumpT<0) this.jumpT=t;
+      const jt=t-this.jumpT;
+      const run=seg(jt,0.3,1.8);
+      axx=lerp(W*0.16,wx-60,easeOut(run));
+      walking=run<1&&run>0;
+      const jump=seg(jt,1.8,2.9);
+      if(jump>0&&jump<1){
+        axx=lerp(wx-60,wx+64,jump);
+        ay=gy-Math.sin(jump*Math.PI)*130;
+        tuck=true; mood=0.6;
+      } else if(jump>=1){
+        axx=wx+64+Math.min((jt-2.9)*60,40); mood=1;
+        if(this.marks[2]===null) this.marks[2]='ok';
+        ctx.fillStyle=C.ok; ctx.font='bold 16px ui-monospace,monospace'; ctx.textAlign='center';
+        ctx.fillText('✓ DEPLOYED',wx,gy-130);
+      }
+    }
+    drawAgent({x:axx,y:ay,walking,walk:(t*2.6)%1,mood,tuck,
+      armR:this.marks[2]==='ok'?-2.5:-0.3});
+  }
+},
+
+// ---- 6: FEEDBACK LOOP — user signal grounds the learning ----
+{ dur:22, act:'act 4 — feedback loop',
+  enter(){resetScratch();
+    counts.proc=Math.max(counts.proc,1); // skill v1 sits back on the shelf after the successful run
+    this.fb=[]; this.sent=0; this.stamp=null; this.conf=0.62; this.confT=0; this.v2=false;},
+  run(t,dt){
+    const gy=groundY(), vw=Math.min(210,W*0.26);
+    const vx=W-24-vw/2, vaultLeft=vx-vw/2;
+    const gx=Math.max(120, Math.min(W*0.5, vaultLeft-100));
+    const ax=Math.max(70, gx-190), ux=Math.max(ax+90, gx-90);
+    if(t<5) setCap('// the deploy worked. but only the user knows if the outcome was actually right.');
+    else if(t<11) setCap('// so ask. user feedback is ground truth the agent cannot generate for itself.');
+    else if(t<16) setCap('// the raw feedback becomes an episode: what the user said happened.');
+    else setCap('// and the skill is revised with it: v1 → v2. self-learning tuned by human signal.');
+
+    const vault=drawVault(vx,gy,vw,1,counts, t<15?'epi':'proc');
+    drawGate(gx,gy,this.stamp,'gate');
+
+    // confidence meter
+    if(this.v2) this.conf=Math.min(0.91, this.conf+dt*0.12);
+    ctx.fillStyle=C.dim; ctx.font='12px ui-monospace,monospace'; ctx.textAlign='left';
+    ctx.fillText('skill confidence: ',60,60);
+    ctx.fillStyle=this.conf>0.8?C.ok:C.token;
+    ctx.fillText(this.conf.toFixed(2)+(this.v2?'  (v2)':'  (v1)'),60+150,60);
+
+    // user walks in, agent waits
+    const uin=easeOut(seg(t,0.5,2.4));
+    const uxx=lerp(-50,ux,uin);
+    const asking=t>3.5&&t<11;
+    drawAgent({x:uxx,y:gy,col:C.user,walking:uin<1,walk:(t*1.6)%1,mood:0.3,
+      armR:asking?-1.4:-0.3});
+    ctx.fillStyle=C.user; ctx.font='10px ui-monospace,monospace'; ctx.textAlign='center';
+    ctx.fillText('user',uxx,gy-96);
+    drawAgent({x:ax,y:gy,mood:this.v2?1:0.4,headTilt:0.3,
+      armR:this.v2?-2.4:-0.3});
+    if(t>2.5&&t<5) bubble(ax,gy-176,'how did the deploy land?',C.ink);
+
+    // user emits two feedback tokens
+    if(t>5&&this.sent<2&&t>5+this.sent*4.2){
+      const items=[{g:'👍 deployed ok',w:104,tier:'epi'},{g:'⚠ config drift',w:104,tier:'proc'}];
+      const it=items[this.sent]; this.sent++;
+      this.fb.push({x:uxx,y:gy-120,g:it.g,w:it.w,a:1,tier:it.tier,phase:'toGate',col:C.user,jt:0});
+    }
+    this.fb.forEach(f=>{
+      if(f.phase==='toGate'){
+        const k=1-Math.pow(0.03,dt);
+        f.x=lerp(f.x,gx-2,k); f.y=lerp(f.y,gy-24,k);
+        if(Math.abs(f.x-(gx-2))<4&&!this.stamp){f.phase='judge';f.jt=0;this.stamp={t:0,ok:true};}
+      } else if(f.phase==='judge'){
+        f.jt+=dt;
+        this.stamp.t = f.jt<1.2 ? clamp(f.jt/1.2,0,1) : 1-seg(f.jt,1.5,2.0);
+        if(f.jt>1.5&&f.phase==='judge'){
+          f.phase = f.tier==='epi' ? 'toEpi' : 'toSkill';
+          f.col = f.tier==='epi' ? C.epi : C.proc;
+        }
+        if(f.jt>2.0) this.stamp=null;
+      } else if(this.stamp&&(f.phase==='toEpi'||f.phase==='toSkill')&&f.jt<99){
+        f.jt+=dt; this.stamp.t=1-seg(f.jt,1.5,2.0);
+        if(f.jt>2.0){this.stamp=null;f.jt=99;}
+      }
+      if(f.phase==='toEpi'&&vault){
+        const ty=vault.top+vault.rh*0+vault.rh-13;
+        const tx=vault.left+18+counts.epi*16;
+        const k=1-Math.pow(0.03,dt);
+        f.x=lerp(f.x,tx,k); f.y=lerp(f.y,ty,k);
+        if(Math.abs(f.x-tx)<3){f.phase='done';counts.epi=Math.min(counts.epi+1,11);}
+      }
+      if(f.phase==='toSkill'&&vault){
+        // fly to the skill v1 slot on the procedural shelf and merge
+        const ty=vault.top+vault.rh*2+vault.rh-13;
+        const tx=vault.left+18;
+        const k=1-Math.pow(0.03,dt);
+        f.x=lerp(f.x,tx,k); f.y=lerp(f.y,ty,k);
+        if(Math.abs(f.x-tx)<3&&Math.abs(f.y-ty)<3){f.phase='merge';f.mt=0;}
+      }
+      if(f.phase==='merge'){
+        f.mt+=dt;
+        const pty=vault.top+vault.rh*2+vault.rh-13, ptx=vault.left+18;
+        // pulse ring on the skill orb
+        const r=8+Math.sin(Math.min(f.mt,1.2)*Math.PI)*10;
+        ctx.save(); ctx.globalAlpha=Math.max(0,1-f.mt/1.4);
+        ctx.beginPath(); ctx.arc(ptx,pty,r,0,7);
+        ctx.strokeStyle=C.proc; ctx.lineWidth=2; ctx.stroke(); ctx.restore();
+        if(f.mt>0.3&&!this.v2){ this.v2=true; }
+        if(f.mt<2.6) bubble(ptx-10,pty-18,'skill v2: patch config + verify drift',C.proc);
+        if(f.mt>2.8) f.phase='done';
+      }
+      // draw the feedback token / orb
+      if(f.phase==='toGate'||f.phase==='judge') drawToken(f);
+      else if(f.phase==='toEpi'||f.phase==='toSkill'){
+        ctx.beginPath(); ctx.arc(f.x,f.y,6,0,7);
+        ctx.fillStyle=f.col; ctx.shadowColor=f.col; ctx.shadowBlur=10; ctx.fill(); ctx.shadowBlur=0;
+      }
+    });
+    // v2 tag on the shelf once merged
+    if(this.v2&&vault){
+      ctx.fillStyle=C.proc; ctx.font='9px ui-monospace,monospace'; ctx.textAlign='center';
+      ctx.fillText('v2', vault.left+18, vault.top+vault.rh*2+vault.rh-26);
+    }
+    if(this.v2&&t>18) bubble(uxx,gy-176,'better every run',C.user);
+  }
+},
+
+// ---- 7: governance ----
+{ dur:24, act:'act 5 — governance',
+  enter(){resetScratch(); this.queue=[
+      {g:'pref',ok:true,tier:'sem'},
+      {g:'PII',ok:false},
+      {g:'skill',ok:true,tier:'proc'},
+      {g:'fluke',ok:false},
+      {g:'event',ok:true,tier:'epi'},
+    ]; this.i=0; this.stamp=null; this.active=null; this.finishers=[];},
+  run(t,dt){
+    const gy=groundY(), vw=Math.min(210,W*0.26);
+    const vx=W-24-vw/2, vaultLeft=vx-vw/2;
+    const gx=Math.max(120, Math.min(W*0.5, vaultLeft-100));
+    if(t<6) setCap('// one warning: memory is a write path into future behavior. never trust it blindly.');
+    else if(t<12) setCap('// every write is judged: provenance, PII, confidence, blast radius.');
+    else setCap('// a fluke success is not a skill. a secret is not a preference. the gate knows the difference.');
+    const vault=drawVault(vx,gy,vw,1,counts);
+    drawGate(gx,gy,this.stamp);
+    if(this.i<this.queue.length&&t>1.0+this.i*3.9&&!this.active){
+      const q=this.queue[this.i];
+      this.active={x:Math.max(-30,gx-330),y:gy-24,g:q.g,ok:q.ok,tier:q.tier,a:1,w:48,col:C.token,phase:'approach',id:this.i};
+      this.i++;
+    }
+    const a=this.active;
+    if(a){
+      if(a.phase==='approach'){ a.x+=150*dt; if(a.x>=gx-2){a.phase='judge';a.jt=0;this.stamp={t:0,ok:a.ok,owner:a.id};} }
+      else if(a.phase==='judge'){
+        a.jt+=dt; this.stamp.t=clamp(a.jt/1.3,0,1);
+        if(a.jt>1.6){
+          if(!a.ok){a.phase='reject';a.rt=0;a.vy=-60;a.vx=60;a.col=C.bad;a.fill='rgba(255,107,107,0.12)';}
+          else{a.phase='morph';a.mt=0;a.col=a.tier==='epi'?C.epi:a.tier==='sem'?C.sem:C.proc;}
+          this.finishers.push(a); this.active=null;
+        }
+      }
+      if(this.active) drawToken(a);
+    }
+    // judged candidates finish their exit while the next one approaches
+    this.finishers=this.finishers.filter(f=>!f.done);
+    this.finishers.forEach(f=>{
+      const mine = this.stamp && this.stamp.owner===f.id;
+      if(f.phase==='morph'){
+        f.mt+=dt;
+        const m=ease(clamp(f.mt/0.8,0,1));
+        if(mine) this.stamp.t=1-m;
+        // box shrinks and fades...
+        ctx.save(); ctx.globalAlpha=1-m;
+        ctx.translate(f.x,f.y);
+        const mw=lerp(f.w,16,m), mh=lerp(20,14,m);
+        ctx.fillStyle='rgba(255,180,84,0.13)'; ctx.strokeStyle=f.col; ctx.lineWidth=1.4;
+        roundRect(-mw/2,-mh/2,mw,mh,5); ctx.fill(); ctx.stroke();
+        ctx.fillStyle=f.col; ctx.font='11px ui-monospace,monospace';
+        ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(f.g,0,1);
+        ctx.restore();
+        // ...as the orb grows in its place
+        ctx.save(); ctx.globalAlpha=m;
+        ctx.beginPath(); ctx.arc(f.x,f.y,lerp(2,6,m),0,7);
+        ctx.fillStyle=f.col; ctx.shadowColor=f.col; ctx.shadowBlur=12*m; ctx.fill();
+        ctx.restore(); ctx.shadowBlur=0;
+        if(f.mt>0.9){f.phase='toVault'; if(mine) this.stamp=null;}
+      } else if(f.phase==='toVault'&&vault){
+        const row=f.tier==='epi'?0:f.tier==='sem'?1:2;
+        const ty=vault.top+vault.rh*row+vault.rh-13;
+        const tx=vault.left+18+counts[f.tier]*16;
+        const k=1-Math.pow(0.03,dt);
+        f.x=lerp(f.x,tx,k); f.y=lerp(f.y,ty,k);
+        ctx.beginPath(); ctx.arc(f.x,f.y,6,0,7);
+        ctx.fillStyle=f.col; ctx.shadowColor=f.col; ctx.shadowBlur=10; ctx.fill(); ctx.shadowBlur=0;
+        if(Math.abs(f.x-tx)<4){counts[f.tier]=Math.min(counts[f.tier]+1,11);f.done=true;}
+      } else if(f.phase==='reject'){
+        f.rt+=dt;
+        if(mine){ this.stamp.t=1-seg(f.rt,0.3,0.9); if(f.rt>0.9) this.stamp=null; }
+        f.vy+=300*dt; f.x+=f.vx*dt; f.y+=f.vy*dt; f.rot=(f.rot||0)+dt*4; f.a-=dt*0.55;
+        if(f.a>0) drawToken(f); else f.done=true;
+      }
+    });
+    drawAgent({x:gx+52,y:gy,mood:0.2,armL:-0.9,armR:-0.2,headTilt:-0.3});
+    ctx.fillStyle=C.dim; ctx.font='10px ui-monospace,monospace'; ctx.textAlign='center';
+    ctx.fillText('reviewer',gx+52,gy-96);
+  }
+},
+
+// ---- 7: end card ----
+{ dur:14, act:'finale',
+  enter(){resetScratch();},
+  run(t){
+    setCap('// agents do not get better by thinking harder. they get better by remembering what worked.');
+    const gy=groundY();
+    const a=ease(seg(t,0.3,1.4));
+    ctx.save(); ctx.globalAlpha=a; ctx.textAlign='center';
+    ctx.fillStyle=C.ink; ctx.font='600 24px ui-monospace,monospace';
+    ctx.fillText('two problems. one memory layer.',W/2,H*0.20);
+    // two columns
+    const colY=H*0.30, lX=W*0.30, rX=W*0.70;
+    const cols=[
+      {x:lX,title:'personalization',rows:[['episodic — what happened with this user',C.epi],['semantic — who this user is',C.sem]]},
+      {x:rX,title:'self-improvement',rows:[['procedural — what works',C.proc],['reflection — failures → skills',C.proc],['feedback — user signal → v2 skills',C.user]]},
+    ];
+    cols.forEach((c,ci)=>{
+      const on=seg(t,1.0+ci*0.6,1.8+ci*0.6);
+      ctx.globalAlpha=a*on;
+      ctx.fillStyle=C.token; ctx.font='600 14px ui-monospace,monospace'; ctx.textAlign='center';
+      ctx.fillText(c.title,c.x,colY);
+      c.rows.forEach((r,i)=>{
+        const y=colY+30+i*24, on2=seg(t,1.6+ci*0.6+i*0.4,2.2+ci*0.6+i*0.4);
+        ctx.globalAlpha=a*on2;
+        ctx.beginPath(); ctx.arc(c.x-118,y-4,5,0,7); ctx.fillStyle=r[1]; ctx.fill();
+        ctx.fillStyle=C.ink; ctx.font='12px ui-monospace,monospace'; ctx.textAlign='left';
+        ctx.fillText(r[0],c.x-104,y);
+        ctx.textAlign='center';
+      });
+    });
+    // gate underneath both
+    const gOn=seg(t,3.4,4.2);
+    ctx.globalAlpha=a*gOn;
+    ctx.strokeStyle='#3a4653'; ctx.lineWidth=1.5;
+    ctx.beginPath();
+    ctx.moveTo(lX,colY+104); ctx.lineTo(lX,colY+126); ctx.lineTo(rX,colY+126); ctx.lineTo(rX,colY+104);
+    ctx.moveTo(W/2,colY+126); ctx.lineTo(W/2,colY+142);
+    ctx.stroke();
+    ctx.fillStyle=C.dim; ctx.font='12px ui-monospace,monospace';
+    ctx.fillText('▼ every write through the governance gate ▼',W/2,colY+160);
+    ctx.restore();
+    // both figures bow
+    const bow=Math.sin(clamp(seg(t,5,7),0,1)*Math.PI)*0.9;
+    drawAgent({x:W/2-50,y:gy,mood:1,lean:bow,armL:0.5+bow,armR:-0.5-bow,headTilt:bow});
+    drawAgent({x:W/2+50,y:gy,col:C.user,mood:1,lean:-bow,armL:0.5+bow,armR:-0.5-bow,headTilt:-bow});
+  }
+}
+];
+
+// ---------- driver ----------
+let scene=0,sceneT=0,playing=true,last=performance.now();
+function buildDots(){
+  dotsEl.innerHTML='';
+  SCENES.forEach((_,i)=>{
+    const b=document.createElement('button');
+    b.setAttribute('aria-label','scene '+(i+1));
+    b.addEventListener('click',()=>gotoScene(i));
+    dotsEl.appendChild(b);
+  });
+}
+function refreshDots(){[...dotsEl.children].forEach((b,i)=>b.classList.toggle('on',i===scene));}
+function gotoScene(i){
+  scene=i; sceneT=0;
+  const s=SCENES[scene]; if(s.enter)s.enter();
+  actEl.textContent=s.act; refreshDots();
+}
+function frame(now){
+  let dt=Math.min((now-last)/1000,0.05); last=now;
+  if(!playing) dt=0;
+  sceneT+=dt;
+  const s=SCENES[scene];
+  drawBg(); s.run(sceneT,dt); tickCap(dt*1000||16);
+  if(sceneT>=s.dur){
+    if(scene<SCENES.length-1) gotoScene(scene+1);
+    else{playing=false;playBtn.textContent='play';}
+  }
+  requestAnimationFrame(frame);
+}
+playBtn.addEventListener('click',()=>{playing=!playing;playBtn.textContent=playing?'pause':'play';last=performance.now();});
+replayBtn.addEventListener('click',()=>{playing=true;playBtn.textContent='pause';counts={epi:0,sem:0,proc:0};gotoScene(0);last=performance.now();});
+buildDots(); gotoScene(0);
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
