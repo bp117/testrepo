@@ -1,0 +1,814 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>animation vs. the ai gateway</title>
+<style>
+  :root{
+    --bg:#0b0f14; --panel:#10161d; --ink:#e6edf3; --dim:#7d8590;
+    --token:#ffb454; --mini:#7ee787; --mid:#6cb6ff; --xl:#d2a8ff;
+    --bad:#ff6b6b; --ok:#7ee787; --user:#8ab4ff;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;background:var(--bg);overflow:hidden}
+  body{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--ink)}
+  #tabbar{
+    height:38px;display:flex;align-items:center;gap:10px;padding:0 14px;
+    background:var(--panel);border-bottom:1px solid #1c232c;font-size:12px;color:var(--dim);user-select:none;
+  }
+  #tabbar .dot{width:9px;height:9px;border-radius:50%}
+  #tabbar .file{color:var(--ink)}
+  #tabbar .file::after{content:" ●";color:var(--token);font-size:9px}
+  #act{margin-left:auto;color:var(--token)}
+  #stage{position:relative;width:100%;height:calc(100% - 38px - 64px)}
+  canvas{display:block;width:100%;height:100%}
+  #caption{
+    height:64px;display:flex;align-items:center;justify-content:space-between;
+    padding:0 18px;background:var(--panel);border-top:1px solid #1c232c;gap:14px;
+  }
+  #cap{font-size:11px;color:#57606a;flex:1}
+  #controls{display:flex;align-items:center;gap:10px}
+  .dots{display:flex;gap:6px}
+  .dots button{width:9px;height:9px;border-radius:50%;border:1px solid #3a4653;background:transparent;cursor:pointer;padding:0}
+  .dots button.on{background:var(--token);border-color:var(--token)}
+  #play,#replay,#voice{
+    background:transparent;border:1px solid #3a4653;color:var(--ink);
+    font-family:inherit;font-size:12px;padding:5px 12px;border-radius:4px;cursor:pointer;
+  }
+  #play:hover,#replay:hover,#voice:hover{border-color:var(--token);color:var(--token)}
+  #voice.on{border-color:var(--ok);color:var(--ok)}
+  @media (max-width:640px){ #cap{display:none} }
+</style>
+</head>
+<body>
+<div id="tabbar">
+  <span class="dot" style="background:#ff5f56"></span>
+  <span class="dot" style="background:#ffbd2e"></span>
+  <span class="dot" style="background:#27c93f"></span>
+  <span class="file">&nbsp;gateway_fusion.demo</span>
+  <span id="act">act 1 — the mess</span>
+</div>
+<div id="stage"><canvas id="cv"></canvas></div>
+<div id="caption">
+  <div id="cap">// narration appears on the stage · tap voice to hear it</div>
+  <div id="controls">
+    <div class="dots" id="dots"></div>
+    <button id="voice">voice: off</button>
+    <button id="play">pause</button>
+    <button id="replay">replay</button>
+  </div>
+</div>
+
+<script>
+(() => {
+"use strict";
+const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
+const dotsEl=document.getElementById('dots');
+const playBtn=document.getElementById('play'), replayBtn=document.getElementById('replay');
+const actEl=document.getElementById('act');
+
+let W=0,H=0,DPR=1;
+function resize(){
+  DPR=Math.min(window.devicePixelRatio||1,2);
+  const r=cv.parentElement.getBoundingClientRect();
+  W=r.width; H=r.height; cv.width=W*DPR; cv.height=H*DPR;
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+window.addEventListener('resize',resize); resize();
+const reduced=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+const C={ink:'#e6edf3',dim:'#7d8590',token:'#ffb454',mini:'#7ee787',mid:'#6cb6ff',
+  xl:'#d2a8ff',bad:'#ff6b6b',ok:'#7ee787',user:'#8ab4ff',grid:'rgba(125,133,144,0.07)'};
+
+const lerp=(a,b,t)=>a+(b-a)*t;
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const ease=t=>t<.5?2*t*t:1-Math.pow(-2*t+2,2)/2;
+const easeOut=t=>1-Math.pow(1-t,3);
+const seg=(t,a,b)=>clamp((t-a)/(b-a),0,1);
+
+function roundRect(x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+}
+
+// ---------- layout ----------
+function groundY(){ return H*0.80; }
+function towerSpacing(){ return Math.min(96, W*0.135); }
+function towerX(i){ return W-46-(2-i)*towerSpacing(); }
+function towerW(){ return Math.min(56, towerSpacing()-14); }
+function appX(i){ return 34+i*Math.max(50, W*0.075); }
+function gateX(){ return Math.min(W*0.47, towerX(0)-towerW()/2-120); }
+const TOWERS=[
+  {label:'swift-mini', col:C.mini, h:72,  price:'$'},
+  {label:'nova-70b',   col:C.mid,  h:104, price:'$$'},
+  {label:'atlas-xl',   col:C.xl,   h:136, price:'$$$'},
+];
+
+// ---------- stick figure ----------
+function drawAgent(p){
+  const s=p.scale||1, x=p.x, y=p.y;
+  const legLen=26*s, torso=30*s, headR=10*s;
+  const hipY=y-legLen;
+  const bob=Math.sin((p.walk||0)*Math.PI*2)*2*s*(p.walking?1:0);
+  const shY=hipY-torso+bob-(p.shrug||0)*4*s;
+  const lean=p.lean||0, shX=x+lean*8*s;
+  ctx.save();
+  ctx.strokeStyle=p.col||C.ink; ctx.lineWidth=3*s; ctx.lineCap='round';
+  const ph=(p.walk||0)*Math.PI*2;
+  const la=p.walking?Math.sin(ph)*0.6:0.12;
+  const ra=p.walking?Math.sin(ph+Math.PI)*0.6:-0.12;
+  ctx.beginPath();
+  ctx.moveTo(x,hipY+bob); ctx.lineTo(x+Math.sin(la)*legLen,y);
+  ctx.moveTo(x,hipY+bob); ctx.lineTo(x+Math.sin(ra)*legLen,y);
+  ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x,hipY+bob); ctx.lineTo(shX,shY); ctx.stroke();
+  const armLen=22*s;
+  const aL=(p.armL!==undefined?p.armL:0.25)+(p.walking?Math.sin(ph+Math.PI)*0.4:0);
+  const aR=(p.armR!==undefined?p.armR:-0.25)+(p.walking?Math.sin(ph)*0.4:0);
+  ctx.beginPath();
+  ctx.moveTo(shX,shY); ctx.lineTo(shX+Math.sin(aL)*armLen,shY+Math.cos(aL)*armLen);
+  ctx.moveTo(shX,shY); ctx.lineTo(shX+Math.sin(aR)*armLen,shY+Math.cos(aR)*armLen);
+  ctx.stroke();
+  const hx=shX+(p.headTilt||0)*4*s, hy=shY-headR-4*s;
+  ctx.beginPath(); ctx.arc(hx,hy,headR,0,Math.PI*2); ctx.stroke();
+  ctx.fillStyle=p.col||C.ink;
+  const eyeY=hy-1*s, mood=p.mood||0;
+  ctx.beginPath(); ctx.arc(hx-3.4*s,eyeY,1.3*s,0,7); ctx.arc(hx+3.4*s,eyeY,1.3*s,0,7); ctx.fill();
+  if(mood>0.3){ ctx.beginPath(); ctx.arc(hx,hy+3*s,3.5*s,0.15*Math.PI,0.85*Math.PI); ctx.stroke(); }
+  if(mood<-0.3){ ctx.beginPath(); ctx.arc(hx,hy+7*s,3.5*s,1.15*Math.PI,1.85*Math.PI); ctx.stroke(); }
+  ctx.restore();
+}
+
+function drawApp(i,mood,label){
+  const gy=groundY();
+  drawAgent({x:appX(i),y:gy,scale:0.8,mood});
+  ctx.fillStyle=C.dim; ctx.font='9px ui-monospace,monospace'; ctx.textAlign='center';
+  ctx.fillText(label||('app_'+String.fromCharCode(97+i)), appX(i), gy+14);
+}
+
+// ---------- tokens ----------
+function drawToken(t){
+  ctx.save(); ctx.globalAlpha=clamp(t.a,0,1);
+  ctx.translate(t.x,t.y); ctx.rotate(t.rot||0);
+  const w=t.w||34,h=20;
+  ctx.fillStyle=t.fill||'rgba(255,180,84,0.13)';
+  ctx.strokeStyle=t.col||C.token; ctx.lineWidth=1.4;
+  roundRect(-w/2,-h/2,w,h,5); ctx.fill(); ctx.stroke();
+  ctx.fillStyle=t.col||C.token; ctx.font='11px ui-monospace,monospace';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(t.g,0,1); ctx.restore();
+}
+function orb(x,y,col,r){
+  ctx.beginPath(); ctx.arc(x,y,r||6,0,7);
+  ctx.fillStyle=col; ctx.shadowColor=col; ctx.shadowBlur=10; ctx.fill(); ctx.shadowBlur=0;
+}
+
+// ---------- towers ----------
+function drawTower(i,t,st){ // st: {online=true,busy,riseFrac}
+  st=st||{};
+  const online = st.online!==false;
+  const x=towerX(i), w=towerW(), spec=TOWERS[i];
+  const gy=groundY();
+  const h=spec.h*(st.riseFrac!==undefined?st.riseFrac:1);
+  if(h<=1) return;
+  ctx.save();
+  ctx.fillStyle='rgba(16,22,29,0.9)';
+  ctx.strokeStyle=online?spec.col:'#4a3236'; ctx.lineWidth=st.busy?2.4:1.6;
+  if(st.busy){ ctx.shadowColor=spec.col; ctx.shadowBlur=14; }
+  roundRect(x-w/2,gy-h,w,h,6); ctx.fill(); ctx.stroke();
+  ctx.shadowBlur=0;
+  // blinking lights
+  for(let k=0;k<3;k++){
+    const ly=gy-h+14+k*12;
+    ctx.beginPath(); ctx.arc(x-w/2+10,ly,2.4,0,7);
+    ctx.fillStyle=online?spec.col:'#3a2a2d';
+    ctx.globalAlpha=online?0.35+0.65*Math.abs(Math.sin(t*2.4+k*1.7+i)):0.5;
+    ctx.fill(); ctx.globalAlpha=1;
+    ctx.fillStyle='rgba(125,133,144,0.25)';
+    ctx.fillRect(x-w/2+18,ly-2,w-28,4);
+  }
+  if(!online){
+    ctx.strokeStyle=C.bad; ctx.lineWidth=3;
+    ctx.beginPath();
+    ctx.moveTo(x-12,gy-h/2-12); ctx.lineTo(x+12,gy-h/2+12);
+    ctx.moveTo(x+12,gy-h/2-12); ctx.lineTo(x-12,gy-h/2+12);
+    ctx.stroke();
+  }
+  ctx.fillStyle=online?spec.col:C.bad; ctx.font='9px ui-monospace,monospace'; ctx.textAlign='center';
+  ctx.fillText(spec.label,x,gy-h-18);
+  ctx.fillStyle=C.dim;
+  ctx.fillText(spec.price,x,gy-h-7);
+  ctx.restore();
+}
+function towerPort(i){ const spec=TOWERS[i]; return {x:towerX(i), y:groundY()-spec.h/2}; }
+
+// ---------- gateway ----------
+function drawGateway(t,st){ // st:{rise, scanT(0..1|-1), scanLabel, cacheFlash, fuseSpin, keys, hiliteModule}
+  st=st||{};
+  const rise=st.rise!==undefined?st.rise:1;
+  if(rise<=0) return null;
+  const gx=gateX(), gy=groundY();
+  const w=Math.min(118,W*0.2), h=150*rise, top=gy-h;
+  ctx.save();
+  ctx.globalAlpha=clamp(rise*1.4,0,1);
+  ctx.fillStyle='rgba(16,22,29,0.92)';
+  ctx.strokeStyle=C.token; ctx.lineWidth=2;
+  roundRect(gx-w/2,top,w,h,8); ctx.fill(); ctx.stroke();
+  ctx.fillStyle=C.token; ctx.font='10px ui-monospace,monospace'; ctx.textAlign='center';
+  ctx.fillText('gateway',gx,top-8);
+  // modules
+  const mods=[['router',0],['cache',1],['fusion',2]];
+  const mh=(h-16)/3;
+  const geom={};
+  mods.forEach(m=>{
+    const my=top+8+m[1]*mh;
+    const hot=st.hiliteModule===m[0];
+    ctx.strokeStyle=hot?C.token:'#3a4653'; ctx.lineWidth=hot?1.8:1.2;
+    roundRect(gx-w/2+8,my,w-16,mh-6,5); ctx.stroke();
+    ctx.fillStyle=hot?C.token:C.dim; ctx.font='9px ui-monospace,monospace';
+    ctx.fillText(m[0],gx,my+12);
+    geom[m[0]]={x:gx,y:my+(mh-6)/2+3,top:my,h:mh-6,w:w-16,left:gx-w/2+8};
+  });
+  // router scan sweep
+  if(st.scanT!==undefined&&st.scanT>=0&&st.scanT<=1){
+    const r=geom.router;
+    const sx=r.left+st.scanT*r.w;
+    ctx.strokeStyle=C.token; ctx.lineWidth=1.5; ctx.globalAlpha=0.9;
+    ctx.beginPath(); ctx.moveTo(sx,r.top+3); ctx.lineTo(sx,r.top+r.h-3); ctx.stroke();
+    ctx.globalAlpha=clamp(rise*1.4,0,1);
+    if(st.scanLabel){
+      ctx.fillStyle=C.token; ctx.font='10px ui-monospace,monospace';
+      ctx.fillText(st.scanLabel,gx,r.top-6);
+    }
+  }
+  // cache flash
+  if(st.cacheFlash>0){
+    const c=geom.cache;
+    ctx.fillStyle=C.ok; ctx.globalAlpha=st.cacheFlash*0.25;
+    roundRect(c.left,c.top,c.w,c.h,5); ctx.fill();
+    ctx.globalAlpha=clamp(rise*1.4,0,1);
+    ctx.fillStyle=C.ok; ctx.font='9px ui-monospace,monospace';
+    ctx.fillText('HIT',gx+c.w/2-14,c.top+12);
+  }
+  // fusion ring
+  if(st.fuseSpin){
+    const f=geom.fusion;
+    ctx.strokeStyle=C.token; ctx.lineWidth=1.4;
+    ctx.setLineDash([5,5]); ctx.lineDashOffset=-t*30;
+    ctx.beginPath(); ctx.arc(f.x,f.y,Math.min(16,f.h/2-2),0,7); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  if(st.keys){
+    ctx.fillStyle=C.dim; ctx.font='9px ui-monospace,monospace';
+    ctx.fillText('keys: '+st.keys+' · quotas · policy',gx,gy+14);
+  }
+  ctx.restore();
+  return {gx,gy,w,top,geom};
+}
+
+// ---------- wires ----------
+function tangleWires(alpha){
+  if(alpha<=0) return;
+  const gy=groundY();
+  ctx.save(); ctx.globalAlpha=alpha;
+  ctx.strokeStyle='rgba(255,107,107,0.4)'; ctx.lineWidth=1.2;
+  for(let i=0;i<3;i++)for(let j=0;j<3;j++){
+    const ax=appX(i), ay=gy-40;
+    const p=towerPort(j);
+    ctx.beginPath();
+    ctx.moveTo(ax,ay);
+    ctx.bezierCurveTo(ax+120+j*40, ay-90-((i*3+j)%4)*30, p.x-140-i*30, p.y-60+((i+j)%3)*40, p.x-towerW()/2, p.y);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+function cleanWires(alpha){
+  if(alpha<=0) return;
+  const gy=groundY(), gx=gateX();
+  ctx.save(); ctx.globalAlpha=alpha;
+  ctx.strokeStyle='rgba(255,180,84,0.45)'; ctx.lineWidth=1.4;
+  for(let i=0;i<3;i++){
+    ctx.beginPath(); ctx.moveTo(appX(i),gy-40);
+    ctx.quadraticCurveTo((appX(i)+gx)/2, gy-70, gx-Math.min(118,W*0.2)/2, gy-75);
+    ctx.stroke();
+  }
+  for(let j=0;j<3;j++){
+    const p=towerPort(j);
+    ctx.beginPath(); ctx.moveTo(gx+Math.min(118,W*0.2)/2, gy-75);
+    ctx.quadraticCurveTo((gx+p.x)/2, gy-90, p.x-towerW()/2, p.y);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// ---------- meters & bubbles ----------
+function spendMeter(y,label,val,col){
+  ctx.save(); ctx.font='12px ui-monospace,monospace'; ctx.textAlign='left';
+  ctx.fillStyle=C.dim; ctx.fillText(label,60,y);
+  ctx.fillStyle=col; ctx.fillText('$'+val.toFixed(2),60+ctx.measureText(label).width+10,y);
+  ctx.restore();
+}
+function bubble(x,y,text,col){
+  ctx.save();
+  ctx.font='11px ui-monospace,monospace';
+  const w=ctx.measureText(text).width+16;
+  ctx.fillStyle='rgba(16,22,29,0.9)'; ctx.strokeStyle=col||'#3a4653'; ctx.lineWidth=1.4;
+  roundRect(x-w/2,y-24,w,20,5); ctx.fill(); ctx.stroke();
+  ctx.fillStyle=col||C.ink; ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(text,x,y-14);
+  ctx.restore();
+}
+
+// ---------- background ----------
+let lineSeed=[];
+function drawBg(){
+  ctx.fillStyle='#0b0f14'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle=C.grid; ctx.font='11px ui-monospace,monospace'; ctx.textAlign='right';
+  if(lineSeed.length===0){ for(let i=0;i<80;i++) lineSeed.push(20+Math.floor(Math.random()*160)); }
+  const lines=Math.floor(H/22);
+  for(let i=0;i<lines;i++){
+    ctx.fillText(String(i+1).padStart(3,' '),34,20+i*22);
+    ctx.fillRect(48,14+i*22,lineSeed[i%80]*0.6,7);
+  }
+  const gy=groundY();
+  ctx.strokeStyle='#1c232c'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(0,gy); ctx.lineTo(W,gy); ctx.stroke();
+}
+
+// ---------- captions (on stage) + voice ----------
+let capTarget='',capShown='',capTimer=0;
+let voiceOn=false, lastSpoken='';
+function speakCap(){
+  if(!voiceOn||!capTarget||capTarget===lastSpoken||!('speechSynthesis' in window)) return;
+  lastSpoken=capTarget;
+  speechSynthesis.cancel();
+  const u=new SpeechSynthesisUtterance(capTarget.replace(/^\/\/\s*/,''));
+  u.rate=1.02; u.pitch=0.95;
+  speechSynthesis.speak(u);
+}
+function setCap(s){ if(s!==capTarget){capTarget=s;capShown='';capTimer=0;speakCap();} }
+function tickCap(dt){
+  if(capShown.length<capTarget.length){
+    capTimer+=dt;
+    const n=(reduced||voiceOn)?capTarget.length:Math.floor(capTimer/16);
+    capShown=capTarget.slice(0,Math.max(capShown.length,Math.min(n,capTarget.length)));
+  }
+  drawCapOnStage();
+}
+function drawCapOnStage(){
+  if(!capShown) return;
+  ctx.save();
+  const fs=W<640?13:15;
+  ctx.font=fs+'px ui-monospace,monospace';
+  const maxW=W-90;
+  let lines=[capShown];
+  if(ctx.measureText(capShown).width>maxW){
+    let cut=Math.floor(capShown.length/2);
+    while(cut<capShown.length&&capShown[cut]!==' ')cut++;
+    lines=[capShown.slice(0,cut),capShown.slice(cut+1)];
+  }
+  const lh=fs+8, blockH=lines.length*lh+18, y0=14;
+  const bw=Math.max(...lines.map(l=>ctx.measureText(l).width))+36;
+  ctx.fillStyle='rgba(11,15,20,0.82)';
+  roundRect(W/2-bw/2,y0,bw,blockH,7); ctx.fill();
+  ctx.strokeStyle='rgba(58,70,83,0.6)'; ctx.lineWidth=1;
+  roundRect(W/2-bw/2,y0,bw,blockH,7); ctx.stroke();
+  ctx.fillStyle='#7fb87f'; ctx.textAlign='center'; ctx.textBaseline='top';
+  lines.forEach((l,i)=>ctx.fillText(l,W/2,y0+11+i*lh));
+  ctx.restore();
+}
+
+// ---------- request flight helper ----------
+function flyTo(o,tx,ty,dt,speed){
+  const k=1-Math.pow(speed||0.03,dt);
+  o.x=lerp(o.x,tx,k); o.y=lerp(o.y,ty,k);
+  return Math.abs(o.x-tx)<4&&Math.abs(o.y-ty)<4;
+}
+
+// ============================ SCENES ============================
+const SCENES=[
+
+// ---- 0: the mess ----
+{ dur:11, act:'act 1 — the mess',
+  enter(){},
+  run(t){
+    if(t<5.5) setCap('// three apps. three models. nine wires. keys scattered everywhere.');
+    else setCap('// every app hardwired to every provider. nobody owns the blast radius.');
+    const gy=groundY();
+    for(let i=0;i<3;i++){
+      const rise=ease(seg(t,0.4+i*0.4,1.6+i*0.4));
+      drawTower(i,t,{riseFrac:rise});
+    }
+    for(let i=0;i<3;i++){
+      const on=seg(t,0.2+i*0.3,1.0+i*0.3);
+      if(on>0) drawApp(i, -0.2);
+    }
+    tangleWires(seg(t,2.2,3.6));
+    // scattered keys
+    const kOn=seg(t,3.4,4.4);
+    if(kOn>0){
+      ctx.save(); ctx.globalAlpha=kOn;
+      ctx.font='13px ui-monospace,monospace'; ctx.textAlign='center'; ctx.fillStyle=C.token;
+      for(let i=0;i<3;i++)for(let j=0;j<3;j++){
+        ctx.globalAlpha=kOn*(0.4+0.5*Math.abs(Math.sin(t*2+i+j)));
+        ctx.fillText('🔑', appX(i)+16+j*13, gy-58-j*14);
+      }
+      ctx.restore();
+    }
+  }
+},
+
+// ---- 1: wrong size, single point of failure ----
+{ dur:17, act:'act 1 — the mess',
+  enter(){this.req=null; this.phase=0; this.spend=0; this.fail=false;},
+  run(t,dt){
+    if(t<5) setCap('// app_a is wired straight to the biggest model. for everything.');
+    else if(t<10) setCap('// a $3 model call answering a 2-cent question. twice.');
+    else setCap('// and when atlas-xl goes down, everything wired to it goes down.');
+    const gy=groundY();
+    const offline=t>10.5;
+    for(let i=0;i<3;i++) drawTower(i,t,{online:i!==2||!offline, busy:this.req&&this.req.at===2&&this.req.phase==='busy'});
+    tangleWires(0.5);
+    drawApp(0, this.fail?-1:(this.spend>0?-0.3:0.1));
+    drawApp(1,-0.2); drawApp(2,-0.2);
+    spendMeter(104,'app_a spend:',this.spend, this.spend>1.5?C.bad:C.token);
+    // fire requests at t=1, t=5.5, t=11.5(fails)
+    const fireTimes=[1,5.5,11.5];
+    if(this.phase<3&&t>fireTimes[this.phase]&&!this.req){
+      this.req={x:appX(0),y:gy-50,g:this.phase===0?'2 + 2 ?':(this.phase===1?'capital of fr?':'2 + 2 ?'),
+        w:this.phase===1?96:70,a:1,at:2,phase:'go'};
+      this.phase++;
+    }
+    const r=this.req;
+    if(r){
+      const p=towerPort(2);
+      if(r.phase==='go'){
+        if(flyTo(r,p.x-towerW()/2-14,p.y,dt,0.04)){
+          if(offline){ r.phase='bounce'; r.vx=-140; r.vy=-120; this.fail=true; }
+          else { r.phase='busy'; r.bt=0; }
+        }
+      } else if(r.phase==='busy'){
+        r.bt+=dt;
+        if(r.bt>1.1){ r.phase='back'; r.g=r.g.includes('capital')?'paris':'4'; r.w=44; r.col=C.xl; }
+      } else if(r.phase==='back'){
+        if(flyTo(r,appX(0),gy-50,dt,0.04)){
+          this.spend+=1.50; this.req=null;
+        }
+      } else if(r.phase==='bounce'){
+        r.vy+=340*dt; r.x+=r.vx*dt; r.y+=r.vy*dt; r.rot=(r.rot||0)-dt*4; r.a-=dt*0.5;
+        if(r.a<=0) this.req=null;
+      }
+      if(r&&r.a>0) drawToken(r);
+    }
+    if(this.fail){
+      ctx.fillStyle=C.bad; ctx.font='bold 14px ui-monospace,monospace'; ctx.textAlign='center';
+      ctx.globalAlpha=0.6+0.4*Math.sin(t*6);
+      ctx.fillText('✗ FAILED', appX(0), gy-104); ctx.globalAlpha=1;
+    }
+  }
+},
+
+// ---- 2: the bridge rises ----
+{ dur:15, act:'act 2 — the bridge',
+  enter(){this.keys=0; this.keyOrbs=[];},
+  run(t,dt){
+    if(t<5) setCap('// the fix: put one bridge in front of every model.');
+    else if(t<10) setCap('// apps talk to a single endpoint. one contract, any provider behind it.');
+    else setCap('// keys, quotas, and policy move into the bridge. apps never hold a secret again.');
+    const gy=groundY();
+    for(let i=0;i<3;i++) drawTower(i,t,{});
+    const rise=ease(seg(t,0.8,2.6));
+    tangleWires(Math.max(0,0.5-rise*0.5));
+    const gw=drawGateway(t,{rise, keys:this.keys>0?this.keys:undefined});
+    cleanWires(seg(t,2.8,4.4));
+    for(let i=0;i<3;i++) drawApp(i, seg(t,3,5)>0.5?0.5:0);
+    // keys fly in
+    if(t>9.5&&this.keyOrbs.length<3&&t>9.5+this.keyOrbs.length*0.8){
+      const i=this.keyOrbs.length;
+      this.keyOrbs.push({x:appX(i)+16,y:gy-70,done:false});
+    }
+    this.keyOrbs.forEach(k=>{
+      if(!k.done&&gw){
+        if(flyTo(k,gw.gx,gw.top+30,dt,0.03)){k.done=true;this.keys++;}
+        else{
+          ctx.font='13px ui-monospace,monospace'; ctx.textAlign='center'; ctx.fillStyle=C.token;
+          ctx.fillText('🔑',k.x,k.y);
+        }
+      }
+    });
+  }
+},
+
+// ---- 3: task-aware rightsizing ----
+{ dur:24, act:'act 3 — rightsizing',
+  enter(){this.queue=[
+      {g:'faq: reset pwd?', w:118, dst:0, cost:0.02, label:'route → swift-mini'},
+      {g:'review this diff', w:118, dst:1, cost:0.18, label:'route → nova-70b'},
+      {g:'contract analysis', w:126, dst:2, cost:1.50, label:'route → atlas-xl'},
+    ]; this.i=0; this.req=null; this.routed=0; this.naive=0; this.scan=-1; this.scanLabel='';},
+  run(t,dt){
+    if(t<6) setCap('// not every prompt deserves the biggest brain.');
+    else if(t<13) setCap('// the router classifies each task and rightsizes the model.');
+    else setCap('// same quality where it matters — at a fraction of the spend.');
+    const gy=groundY();
+    for(let i=0;i<3;i++) drawTower(i,t,{busy:this.req&&this.req.phase==='busy'&&this.req.dst===i});
+    const gw=drawGateway(t,{rise:1, scanT:this.scan, scanLabel:this.scanLabel, keys:3, hiliteModule:'router'});
+    cleanWires(0.9);
+    for(let i=0;i<3;i++) drawApp(i,0.2);
+    spendMeter(104,'all-to-xl :',this.naive,C.bad);
+    spendMeter(126,'routed    :',this.routed,C.ok);
+    if(this.i<this.queue.length&&t>1.5+this.i*6.6&&!this.req){
+      const q=this.queue[this.i];
+      this.req={x:appX(this.i%3),y:gy-50,g:q.g,w:q.w,a:1,dst:q.dst,cost:q.cost,label:q.label,
+        app:this.i%3,phase:'toGate'};
+      this.i++;
+    }
+    const r=this.req;
+    if(r&&gw){
+      if(r.phase==='toGate'){
+        if(flyTo(r,gw.gx,gw.geom.router.y,dt,0.035)){r.phase='scan';r.st=0;}
+      } else if(r.phase==='scan'){
+        r.st+=dt; this.scan=clamp(r.st/1.3,0,1); this.scanLabel=r.st>0.5?r.label:'classifying…';
+        if(r.st>1.9){ r.phase='toTower'; this.scan=-1; this.scanLabel=''; }
+      } else if(r.phase==='toTower'){
+        const p=towerPort(r.dst);
+        if(flyTo(r,p.x-towerW()/2-14,p.y,dt,0.035)){r.phase='busy';r.bt=0;}
+      } else if(r.phase==='busy'){
+        r.bt+=dt;
+        if(r.bt>1.0){ r.phase='back'; r.g='✓'; r.w=30; r.col=TOWERS[r.dst].col; }
+      } else if(r.phase==='back'){
+        if(flyTo(r,appX(r.app),gy-50,dt,0.035)){
+          this.routed+=r.cost; this.naive+=1.50; this.req=null;
+        }
+      }
+      if(this.req&&(r.phase==='scan')) { /* token sits in router while scanned */ drawToken(r); }
+      else if(this.req) drawToken(r);
+    }
+  }
+},
+
+// ---- 4: resilience — failover + cache ----
+{ dur:20, act:'act 4 — resilience',
+  enter(){this.req=null; this.stage=0; this.novaDown=false; this.cacheFlash=0; this.saved=0;},
+  run(t,dt){
+    if(t<6) setCap('// a model dies mid-request. the bridge reroutes. the app never knows.');
+    else if(t<13) setCap('// retries, fallbacks, timeouts — handled once, at the bridge, for every app.');
+    else setCap('// and if the answer was seen before, the cache serves it. latency ~0, cost $0.');
+    const gy=groundY();
+    this.cacheFlash=Math.max(0,this.cacheFlash-dt*0.8);
+    for(let i=0;i<3;i++) drawTower(i,t,{online:!(i===1&&this.novaDown),
+      busy:this.req&&this.req.phase==='busy'&&this.req.dst===i});
+    const gw=drawGateway(t,{rise:1, keys:3, cacheFlash:this.cacheFlash,
+      hiliteModule:t<12?'router':'cache'});
+    cleanWires(0.9);
+    for(let i=0;i<3;i++) drawApp(i, 0.3);
+    // stage 0: summarize → nova, nova dies mid-flight, reroute to swift
+    if(this.stage===0&&t>1.5&&!this.req){
+      this.req={x:appX(1),y:gy-50,g:'summarize doc',w:104,a:1,dst:1,app:1,phase:'toGate'};
+      this.stage=1;
+    }
+    // stage 2: faq repeat → cache hit
+    if(this.stage===2&&t>13.5&&!this.req){
+      this.req={x:appX(0),y:gy-50,g:'faq: reset pwd?',w:118,a:1,app:0,phase:'toGateC'};
+      this.stage=3;
+    }
+    const r=this.req;
+    if(r&&gw){
+      if(r.phase==='toGate'){
+        if(flyTo(r,gw.gx,gw.geom.router.y,dt,0.035)){r.phase='toTower';}
+      } else if(r.phase==='toTower'){
+        const p=towerPort(r.dst);
+        // nova dies when the request is 60% of the way there
+        if(r.dst===1&&!this.novaDown&&r.x>lerp(gw.gx,p.x,0.55)) this.novaDown=true;
+        if(this.novaDown&&r.dst===1){ r.phase='pullback'; }
+        else if(flyTo(r,p.x-towerW()/2-14,p.y,dt,0.035)){r.phase='busy';r.bt=0;}
+      } else if(r.phase==='pullback'){
+        if(flyTo(r,gw.gx,gw.geom.router.y,dt,0.03)){
+          r.phase='toTower'; r.dst=0; // fall back to swift-mini
+          bubble(gw.gx,gw.top-14,'fallback: swift-mini',C.token);
+        } else bubble(gw.gx,gw.top-14,'nova-70b timeout — rerouting',C.bad);
+      } else if(r.phase==='busy'){
+        r.bt+=dt;
+        if(r.bt>1.0){ r.phase='back'; r.g='✓'; r.w=30; r.col=TOWERS[r.dst].col; }
+      } else if(r.phase==='back'){
+        if(flyTo(r,appX(r.app),gy-50,dt,0.035)){
+          this.req=null; if(this.stage===1) this.stage=2;
+        }
+      } else if(r.phase==='toGateC'){
+        if(flyTo(r,gw.gx,gw.geom.cache.y,dt,0.035)){
+          r.phase='cacheBack'; this.cacheFlash=1;
+          r.g='✓ cached'; r.w=76; r.col=C.ok;
+        }
+      } else if(r.phase==='cacheBack'){
+        if(flyTo(r,appX(r.app),gy-50,dt,0.05)){
+          this.req=null; this.saved=1;
+        }
+      }
+      if(this.req) drawToken(r);
+    }
+    if(this.saved){
+      bubble(appX(0),gy-116,'$0.00 · 12ms',C.ok);
+    }
+  }
+},
+
+// ---- 5: model fusion ----
+{ dur:22, act:'act 5 — model fusion',
+  enter(){this.req=null; this.copies=[]; this.shards=[]; this.stage=0;
+    this.scan=-1; this.scanLabel=''; this.fuseT=-1; this.answer=null; this.busy=[0,0,0];},
+  run(t,dt){
+    if(t<6) setCap('// some questions are worth asking three minds at once.');
+    else if(t<12) setCap('// fan out. collect the candidates. fuse — vote, judge, or synthesize.');
+    else if(t<17) setCap('// the fused answer beats the best single model.');
+    else setCap('// best single: 0.74 · fused: 0.92 — that is model fusion.');
+    const gy=groundY();
+    for(let i=0;i<3;i++) drawTower(i,t,{busy:this.busy[i]>0});
+    this.busy=this.busy.map(b=>Math.max(0,b-dt));
+    const gw=drawGateway(t,{rise:1, keys:3, scanT:this.scan, scanLabel:this.scanLabel,
+      fuseSpin:this.stage>=2, hiliteModule:this.stage>=2?'fusion':'router'});
+    cleanWires(0.9);
+    for(let i=0;i<3;i++) drawApp(i, this.answer&&this.answer.done?1:0.2);
+    if(t>14){
+      ctx.save(); ctx.font='12px ui-monospace,monospace'; ctx.textAlign='left';
+      ctx.fillStyle=C.dim; ctx.fillText('best single: ',60,104);
+      ctx.fillStyle=C.token; ctx.fillText('0.74',60+110,104);
+      ctx.fillStyle=C.dim; ctx.fillText('fused      : ',60,126);
+      ctx.fillStyle=C.ok; ctx.fillText('0.92',60+110,126);
+      ctx.restore();
+    }
+    // launch hard request
+    if(this.stage===0&&t>1.5&&!this.req){
+      this.req={x:appX(1),y:gy-50,g:'hard: cross-doc synthesis',w:170,a:1,phase:'toGate'};
+    }
+    const r=this.req;
+    if(r&&gw){
+      if(r.phase==='toGate'){
+        if(flyTo(r,gw.gx,gw.geom.router.y,dt,0.035)){r.phase='scan';r.st=0;}
+      } else if(r.phase==='scan'){
+        r.st+=dt; this.scan=clamp(r.st/1.3,0,1);
+        this.scanLabel=r.st>0.5?'hard → fan-out ×3':'classifying…';
+        if(r.st>2.1){
+          this.scan=-1; this.scanLabel=''; this.req=null; this.stage=1;
+          for(let j=0;j<3;j++) this.copies.push({x:gw.gx,y:gw.geom.router.y,g:'q'+(j+1),w:30,a:1,dst:j,phase:'go'});
+        }
+      }
+      if(this.req) drawToken(r);
+    }
+    // copies fan out; shards return
+    this.copies.forEach(c=>{
+      if(c.phase==='go'){
+        const p=towerPort(c.dst);
+        if(flyTo(c,p.x-towerW()/2-12,p.y,dt,0.03)){
+          c.phase='think'; c.bt=0; this.busy[c.dst]=1.4;
+        }
+      } else if(c.phase==='think'){
+        c.bt+=dt;
+        if(c.bt>1.4){
+          c.phase='done';
+          this.shards.push({x:c.x,y:c.y,col:TOWERS[c.dst].col,phase:'return',ang:c.dst*2.1});
+        }
+      }
+      if(c.phase!=='done') drawToken(c);
+    });
+    // shards orbit fusion ring then merge
+    const f=gw?gw.geom.fusion:null;
+    let arrived=0;
+    this.shards.forEach(s=>{
+      if(s.phase==='return'&&f){
+        if(flyTo(s,f.x,f.y,dt,0.03)) s.phase='orbit';
+      }
+      if(s.phase==='orbit') arrived++;
+    });
+    if(arrived===3&&this.stage===1){ this.stage=2; this.fuseT=0; }
+    if(this.stage===2&&f){
+      this.fuseT+=dt;
+      const shrink=clamp(this.fuseT/2.4,0,1);
+      this.shards.forEach((s,k)=>{
+        const rad=lerp(22,2,ease(shrink));
+        const a=s.ang+this.fuseT*2.6;
+        s.x=f.x+Math.cos(a)*rad; s.y=f.y+Math.sin(a)*rad;
+      });
+      if(this.fuseT>2.4&&!this.answer){
+        // flash + fused answer orb
+        this.answer={x:f.x,y:f.y,done:false};
+        this.shards=[];
+        this.stage=3;
+      }
+    }
+    this.shards.forEach(s=>{
+      ctx.save();
+      ctx.translate(s.x,s.y); ctx.rotate(s.ang+t);
+      ctx.beginPath(); ctx.moveTo(0,-7); ctx.lineTo(6,5); ctx.lineTo(-6,5); ctx.closePath();
+      ctx.fillStyle=s.col; ctx.shadowColor=s.col; ctx.shadowBlur=8; ctx.fill(); ctx.shadowBlur=0;
+      ctx.restore();
+    });
+    if(this.answer){
+      const a=this.answer;
+      if(!a.flash){ a.flash=0; }
+      a.flash=Math.min(1,(a.flash||0)+dt*2);
+      if(a.flash<1&&f){
+        ctx.save(); ctx.globalAlpha=1-a.flash;
+        ctx.beginPath(); ctx.arc(f.x,f.y,10+a.flash*30,0,7);
+        ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.stroke(); ctx.restore();
+      }
+      if(!a.done){
+        if(flyTo(a,appX(1),groundY()-50,dt,0.025)) a.done=true;
+      }
+      ctx.beginPath(); ctx.arc(a.x,a.y,8,0,7);
+      const g=ctx.createRadialGradient(a.x,a.y,1,a.x,a.y,10);
+      g.addColorStop(0,'#fff'); g.addColorStop(1,C.token);
+      ctx.fillStyle=g; ctx.shadowColor=C.token; ctx.shadowBlur=16; ctx.fill(); ctx.shadowBlur=0;
+      if(a.done) bubble(appX(1),groundY()-116,'fused answer ✓ 0.92',C.ok);
+    }
+  }
+},
+
+// ---- 6: end card ----
+{ dur:15, act:'finale',
+  enter(){},
+  run(t){
+    setCap('// apps talk to one door. the door talks to every mind. that is the gateway.');
+    const gy=groundY();
+    const a=ease(seg(t,0.3,1.4));
+    ctx.save(); ctx.globalAlpha=a; ctx.textAlign='center';
+    ctx.fillStyle=C.ink; ctx.font='600 24px ui-monospace,monospace';
+    ctx.fillText('one bridge. many minds.',W/2,H*0.20);
+    const rows=[
+      ['route by task — rightsize every call',C.mini],
+      ['survive failures — retry, fall back, reroute',C.mid],
+      ['remember answers — cache the repeats',C.ok],
+      ['fuse when it matters — vote, judge, synthesize',C.token],
+      ['meter every token — keys, quotas, policy in one place',C.xl],
+    ];
+    rows.forEach((r,i)=>{
+      const y=H*0.20+40+i*26, on=seg(t,1.0+i*0.5,1.7+i*0.5);
+      ctx.globalAlpha=a*on;
+      ctx.beginPath(); ctx.arc(W/2-190,y-4,5,0,7); ctx.fillStyle=r[1]; ctx.fill();
+      ctx.fillStyle=C.ink; ctx.font='12px ui-monospace,monospace'; ctx.textAlign='left';
+      ctx.fillText(r[0],W/2-176,y);
+      ctx.textAlign='center';
+    });
+    ctx.restore();
+    // towers + gateway silhouette at the bottom, agent bows
+    for(let i=0;i<3;i++) drawTower(i,t,{});
+    drawGateway(t,{rise:1,keys:3});
+    const bow=Math.sin(clamp(seg(t,5,7),0,1)*Math.PI)*0.9;
+    drawAgent({x:appX(1),y:gy,mood:1,lean:bow,armL:0.5+bow,armR:-0.5-bow,headTilt:bow});
+  }
+}
+];
+
+// ---------- driver ----------
+let scene=0,sceneT=0,playing=true,last=performance.now();
+function buildDots(){
+  dotsEl.innerHTML='';
+  SCENES.forEach((_,i)=>{
+    const b=document.createElement('button');
+    b.setAttribute('aria-label','scene '+(i+1));
+    b.addEventListener('click',()=>gotoScene(i));
+    dotsEl.appendChild(b);
+  });
+}
+function refreshDots(){[...dotsEl.children].forEach((b,i)=>b.classList.toggle('on',i===scene));}
+function gotoScene(i){
+  scene=i; sceneT=0;
+  const s=SCENES[scene]; if(s.enter)s.enter();
+  actEl.textContent=s.act; refreshDots();
+}
+function frame(now){
+  let dt=Math.min((now-last)/1000,0.05); last=now;
+  if(!playing) dt=0;
+  sceneT+=dt;
+  const s=SCENES[scene];
+  drawBg(); s.run(sceneT,dt); tickCap(dt*1000||16);
+  if(sceneT>=s.dur){
+    if(scene<SCENES.length-1) gotoScene(scene+1);
+    else{playing=false;playBtn.textContent='play';}
+  }
+  requestAnimationFrame(frame);
+}
+playBtn.addEventListener('click',()=>{
+  playing=!playing;playBtn.textContent=playing?'pause':'play';last=performance.now();
+  if(!playing&&('speechSynthesis' in window)) speechSynthesis.cancel();
+});
+const voiceBtn=document.getElementById('voice');
+voiceBtn.addEventListener('click',()=>{
+  voiceOn=!voiceOn;
+  voiceBtn.textContent='voice: '+(voiceOn?'on':'off');
+  voiceBtn.classList.toggle('on',voiceOn);
+  if(voiceOn){lastSpoken='';speakCap();}
+  else if('speechSynthesis' in window) speechSynthesis.cancel();
+});
+replayBtn.addEventListener('click',()=>{
+  playing=true;playBtn.textContent='pause';
+  lastSpoken=''; if('speechSynthesis' in window) speechSynthesis.cancel();
+  gotoScene(0);last=performance.now();
+});
+buildDots(); gotoScene(0);
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
