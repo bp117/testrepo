@@ -1,0 +1,866 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>animation vs. the bounded adaptive harness</title>
+<style>
+  :root{--bg:#0b0f14;--panel:#10161d;--ink:#e6edf3;--dim:#7d8590;--amber:#ffb454;
+    --ok:#7ee787;--bad:#ff6b6b;--blue:#6cb6ff;--purple:#d2a8ff;--user:#8ab4ff}
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;background:var(--bg);overflow:hidden}
+  body{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--ink)}
+  #tabbar{height:38px;display:flex;align-items:center;gap:10px;padding:0 14px;
+    background:var(--panel);border-bottom:1px solid #1c232c;font-size:12px;color:var(--dim);user-select:none}
+  #tabbar .dot{width:9px;height:9px;border-radius:50%}
+  #tabbar .file{color:var(--ink)}
+  #tabbar .file::after{content:" ●";color:var(--amber);font-size:9px}
+  #act{margin-left:auto;color:var(--amber)}
+  #stage{position:relative;width:100%;height:calc(100% - 38px - 58px)}
+  canvas{display:block;width:100%;height:100%}
+  #bar{height:58px;display:flex;align-items:center;justify-content:space-between;
+    padding:0 16px;background:var(--panel);border-top:1px solid #1c232c;gap:12px}
+  .dots{display:flex;gap:5px;flex-wrap:wrap}
+  .dots button{width:9px;height:9px;border-radius:50%;border:1px solid #3a4653;background:transparent;cursor:pointer;padding:0}
+  .dots button.on{background:var(--amber);border-color:var(--amber)}
+  .btn{background:transparent;border:1px solid #3a4653;color:var(--ink);
+    font-family:inherit;font-size:12px;padding:5px 12px;border-radius:4px;cursor:pointer}
+  .btn:hover{border-color:var(--amber);color:var(--amber)}
+  #voice.on{border-color:var(--ok);color:var(--ok)}
+  .grp{display:flex;gap:8px}
+</style>
+</head>
+<body>
+<div id="tabbar">
+  <span class="dot" style="background:#ff5f56"></span>
+  <span class="dot" style="background:#ffbd2e"></span>
+  <span class="dot" style="background:#27c93f"></span>
+  <span class="file">&nbsp;tachyon_harness.demo</span>
+  <span id="act">scene 1 — 02:13</span>
+</div>
+<div id="stage"><canvas id="cv"></canvas></div>
+<div id="bar">
+  <div class="dots" id="dots"></div>
+  <div class="grp">
+    <button class="btn" id="voice">voice: off</button>
+    <button class="btn" id="play">pause</button>
+    <button class="btn" id="replay">replay</button>
+  </div>
+</div>
+
+<script>
+(() => {
+"use strict";
+const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
+let W=0,H=0;
+function resize(){
+  const DPR=Math.min(window.devicePixelRatio||1,2);
+  const r=cv.parentElement.getBoundingClientRect();
+  W=r.width;H=r.height;cv.width=W*DPR;cv.height=H*DPR;
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+window.addEventListener('resize',resize);resize();
+const reduced=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+const C={ink:'#e6edf3',dim:'#7d8590',amber:'#ffb454',ok:'#7ee787',bad:'#ff6b6b',
+  blue:'#6cb6ff',purple:'#d2a8ff',user:'#8ab4ff',grid:'rgba(125,133,144,0.07)'};
+const lerp=(a,b,t)=>a+(b-a)*t, clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const ease=t=>t<.5?2*t*t:1-Math.pow(-2*t+2,2)/2;
+const easeOut=t=>1-Math.pow(1-t,3);
+const seg=(t,a,b)=>clamp((t-a)/(b-a),0,1);
+const gy=()=>H*0.80;
+function roundRect(x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();
+}
+function flyTo(o,tx,ty,dt,k){
+  const s=1-Math.pow(k||0.03,dt);
+  o.x=lerp(o.x,tx,s);o.y=lerp(o.y,ty,s);
+  return Math.abs(o.x-tx)<4&&Math.abs(o.y-ty)<4;
+}
+
+/* ---- primitives ---- */
+function agent(p){
+  const s=p.scale||1,x=p.x,y=p.y;
+  const legLen=26*s,torso=30*s,headR=10*s,hipY=y-legLen;
+  const bob=Math.sin((p.walk||0)*Math.PI*2)*2*s*(p.walking?1:0);
+  const shY=hipY-torso+bob-(p.shrug||0)*4*s;
+  const lean=p.lean||0,shX=x+lean*8*s;
+  ctx.save();ctx.strokeStyle=p.col||C.ink;ctx.lineWidth=3*s;ctx.lineCap='round';
+  const ph=(p.walk||0)*Math.PI*2;
+  const la=p.walking?Math.sin(ph)*0.6:0.12,ra=p.walking?Math.sin(ph+Math.PI)*0.6:-0.12;
+  ctx.beginPath();
+  ctx.moveTo(x,hipY+bob);ctx.lineTo(x+Math.sin(la)*legLen,y);
+  ctx.moveTo(x,hipY+bob);ctx.lineTo(x+Math.sin(ra)*legLen,y);
+  ctx.stroke();
+  ctx.beginPath();ctx.moveTo(x,hipY+bob);ctx.lineTo(shX,shY);ctx.stroke();
+  const armLen=22*s;
+  const aL=(p.armL!==undefined?p.armL:0.25)+(p.walking?Math.sin(ph+Math.PI)*0.4:0);
+  const aR=(p.armR!==undefined?p.armR:-0.25)+(p.walking?Math.sin(ph)*0.4:0);
+  ctx.beginPath();
+  ctx.moveTo(shX,shY);ctx.lineTo(shX+Math.sin(aL)*armLen,shY+Math.cos(aL)*armLen);
+  ctx.moveTo(shX,shY);ctx.lineTo(shX+Math.sin(aR)*armLen,shY+Math.cos(aR)*armLen);
+  ctx.stroke();
+  const hx=shX+(p.headTilt||0)*4*s,hy=shY-headR-4*s;
+  ctx.beginPath();ctx.arc(hx,hy,headR,0,Math.PI*2);ctx.stroke();
+  ctx.fillStyle=p.col||C.ink;const mood=p.mood||0;
+  ctx.beginPath();ctx.arc(hx-3.4*s,hy-1*s,1.3*s,0,7);ctx.arc(hx+3.4*s,hy-1*s,1.3*s,0,7);ctx.fill();
+  if(mood>0.3){ctx.beginPath();ctx.arc(hx,hy+3*s,3.5*s,0.15*Math.PI,0.85*Math.PI);ctx.stroke();}
+  if(mood<-0.3){ctx.beginPath();ctx.arc(hx,hy+7*s,3.5*s,1.15*Math.PI,1.85*Math.PI);ctx.stroke();}
+  ctx.restore();
+}
+function tokenD(t){
+  ctx.save();ctx.globalAlpha=clamp(t.a===undefined?1:t.a,0,1);
+  ctx.translate(t.x,t.y);ctx.rotate(t.rot||0);
+  ctx.font='11px ui-monospace,monospace';
+  const w=t.w||Math.max(30,ctx.measureText(t.g).width+16),h=20;
+  ctx.fillStyle=t.fill||'rgba(255,180,84,0.13)';
+  ctx.strokeStyle=t.col||C.amber;ctx.lineWidth=1.4;
+  roundRect(-w/2,-h/2,w,h,5);ctx.fill();ctx.stroke();
+  ctx.fillStyle=t.col||C.amber;ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.fillText(t.g,0,1);ctx.restore();
+}
+function orb(x,y,col,r){
+  ctx.beginPath();ctx.arc(x,y,r||6,0,7);
+  ctx.fillStyle=col;ctx.shadowColor=col;ctx.shadowBlur=10;ctx.fill();ctx.shadowBlur=0;
+}
+function bubble(x,y,text,col){
+  ctx.save();ctx.font='11px ui-monospace,monospace';
+  const w=ctx.measureText(text).width+16;
+  ctx.fillStyle='rgba(16,22,29,0.9)';ctx.strokeStyle=col||'#3a4653';ctx.lineWidth=1.4;
+  roundRect(x-w/2,y-24,w,20,5);ctx.fill();ctx.stroke();
+  ctx.fillStyle=col||C.ink;ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.fillText(text,x,y-14);ctx.restore();
+}
+function envelope(x,y,w,h,col,label,dash){
+  ctx.save();ctx.strokeStyle=col;ctx.lineWidth=1.6;
+  if(dash){ctx.setLineDash([6,6]);ctx.lineDashOffset=-performance.now()/60;}
+  roundRect(x-w/2,y-h,w,h,10);ctx.stroke();ctx.setLineDash([]);
+  if(label){ctx.fillStyle=col;ctx.font='10px ui-monospace,monospace';ctx.textAlign='left';
+    ctx.fillText(label,x-w/2+8,y-h+14);}
+  ctx.restore();
+}
+function gate(gx,y,stamp,label){
+  ctx.save();ctx.strokeStyle='#3a4653';ctx.lineWidth=2;
+  ctx.beginPath();
+  ctx.moveTo(gx-16,y-46);ctx.lineTo(gx-16,y);
+  ctx.moveTo(gx+16,y-46);ctx.lineTo(gx+16,y);
+  ctx.moveTo(gx-24,y-46);ctx.lineTo(gx+24,y-46);
+  ctx.stroke();
+  ctx.fillStyle=C.dim;ctx.font='10px ui-monospace,monospace';ctx.textAlign='center';
+  ctx.fillText(label||'gate',gx,y-56);
+  if(stamp){
+    const drop=easeOut(clamp(stamp.t*2,0,1));
+    const sy=y-46+drop*18;
+    ctx.strokeStyle=stamp.ok?C.ok:C.bad;ctx.lineWidth=2.4;
+    ctx.beginPath();ctx.moveTo(gx-10,sy);ctx.lineTo(gx+10,sy);ctx.stroke();
+    if(stamp.t>0.5){ctx.fillStyle=stamp.ok?C.ok:C.bad;ctx.font='bold 13px ui-monospace,monospace';
+      ctx.fillText(stamp.ok?'✓':'✗',gx,sy+16);}
+  }
+  ctx.restore();
+}
+function towerD(x,label,col,online,busy,t,h){
+  h=h||104;const w=Math.min(56,W*0.09);
+  ctx.save();
+  ctx.fillStyle='rgba(16,22,29,0.9)';
+  ctx.strokeStyle=online!==false?col:'#4a3236';ctx.lineWidth=busy?2.4:1.6;
+  if(busy){ctx.shadowColor=col;ctx.shadowBlur=14;}
+  roundRect(x-w/2,gy()-h,w,h,6);ctx.fill();ctx.stroke();ctx.shadowBlur=0;
+  for(let k=0;k<3;k++){
+    const ly=gy()-h+14+k*12;
+    ctx.beginPath();ctx.arc(x-w/2+10,ly,2.4,0,7);
+    ctx.fillStyle=online!==false?col:'#3a2a2d';
+    ctx.globalAlpha=online!==false?0.35+0.65*Math.abs(Math.sin(t*2.4+k*1.7)):0.5;
+    ctx.fill();ctx.globalAlpha=1;
+    ctx.fillStyle='rgba(125,133,144,0.25)';ctx.fillRect(x-w/2+18,ly-2,w-28,4);
+  }
+  if(online===false){
+    ctx.strokeStyle=C.bad;ctx.lineWidth=3;
+    ctx.beginPath();
+    ctx.moveTo(x-12,gy()-h/2-12);ctx.lineTo(x+12,gy()-h/2+12);
+    ctx.moveTo(x+12,gy()-h/2-12);ctx.lineTo(x-12,gy()-h/2+12);ctx.stroke();
+  }
+  ctx.fillStyle=online!==false?col:C.bad;ctx.font='9px ui-monospace,monospace';ctx.textAlign='center';
+  ctx.fillText(label,x,gy()-h-10);ctx.restore();
+}
+function hud(text,row,col){
+  ctx.save();ctx.font='12px ui-monospace,monospace';ctx.textAlign='left';
+  ctx.fillStyle=col||C.dim;ctx.fillText(text,60,104+(row||0)*22);ctx.restore();
+}
+let lineSeed=[];
+function bg(){
+  ctx.fillStyle='#0b0f14';ctx.fillRect(0,0,W,H);
+  ctx.fillStyle=C.grid;ctx.font='11px ui-monospace,monospace';ctx.textAlign='right';
+  if(!lineSeed.length){for(let i=0;i<80;i++)lineSeed.push(20+Math.floor(Math.random()*160));}
+  const n=Math.floor(H/22);
+  for(let i=0;i<n;i++){
+    ctx.fillText(String(i+1).padStart(3,' '),34,20+i*22);
+    ctx.fillRect(48,14+i*22,lineSeed[i%80]*0.6,7);
+  }
+  ctx.strokeStyle='#1c232c';ctx.lineWidth=2;
+  ctx.beginPath();ctx.moveTo(0,gy());ctx.lineTo(W,gy());ctx.stroke();
+}
+
+/* ---- ledger (shared evidence plane) ---- */
+let receipts=0;
+function ledger(x){
+  const lx=x!==undefined?x:W-70;
+  ctx.save();
+  ctx.strokeStyle='#3a4653';ctx.lineWidth=2;
+  ctx.beginPath();ctx.moveTo(lx-40,gy());ctx.lineTo(lx+40,gy());ctx.stroke();
+  for(let i=0;i<Math.min(receipts,9);i++){
+    ctx.strokeStyle=C.ok;ctx.lineWidth=1.2;ctx.globalAlpha=0.8;
+    roundRect(lx-22,gy()-8-i*7,44,5,2);ctx.stroke();
+  }
+  ctx.globalAlpha=1;ctx.fillStyle=C.dim;ctx.font='9px ui-monospace,monospace';ctx.textAlign='center';
+  ctx.fillText('evidence ('+receipts+')',lx,gy()+14);
+  ctx.restore();
+  return {x:lx,y:gy()-10};
+}
+function dropReceipt(anims,fromX,fromY){
+  const o={x:fromX,y:fromY};
+  anims.push({update(dt){const l=ledger._pos||{x:W-70,y:gy()-14};
+    if(flyTo(o,l.x,l.y,dt,0.02)){receipts++;return true;}return false;},
+    draw(){ctx.save();ctx.globalAlpha=0.9;ctx.strokeStyle=C.ok;ctx.lineWidth=1.2;
+      roundRect(o.x-14,o.y-5,28,10,2);ctx.stroke();ctx.restore();}});
+}
+
+/* ---- captions + voice ---- */
+let capTarget='',capShown='',capTimer=0,voiceOn=false,lastSpoken='';
+function speakCap(){
+  if(!voiceOn||!capTarget||capTarget===lastSpoken||!('speechSynthesis' in window))return;
+  lastSpoken=capTarget;speechSynthesis.cancel();
+  const u=new SpeechSynthesisUtterance(capTarget.replace(/^\/\/\s*/,''));
+  u.rate=1.02;u.pitch=0.95;speechSynthesis.speak(u);
+}
+function setCap(s){if(s!==capTarget){capTarget=s;capShown='';capTimer=0;speakCap();}}
+function drawCap(ms){
+  if(capShown.length<capTarget.length){
+    capTimer+=ms;
+    const n=(reduced||voiceOn)?capTarget.length:Math.floor(capTimer/16);
+    capShown=capTarget.slice(0,Math.max(capShown.length,Math.min(n,capTarget.length)));
+  }
+  if(!capShown)return;
+  ctx.save();
+  const fs=W<640?12:15;ctx.font=fs+'px ui-monospace,monospace';
+  const maxW=W-90;let lines=[capShown];
+  if(ctx.measureText(capShown).width>maxW){
+    let cut=Math.floor(capShown.length/2);
+    while(cut<capShown.length&&capShown[cut]!==' ')cut++;
+    lines=[capShown.slice(0,cut),capShown.slice(cut+1)];
+  }
+  const lh=fs+8,bh=lines.length*lh+18,y0=14;
+  const bw=Math.max(...lines.map(l=>ctx.measureText(l).width))+36;
+  ctx.fillStyle='rgba(11,15,20,0.85)';roundRect(W/2-bw/2,y0,bw,bh,7);ctx.fill();
+  ctx.strokeStyle='rgba(58,70,83,0.6)';ctx.lineWidth=1;roundRect(W/2-bw/2,y0,bw,bh,7);ctx.stroke();
+  ctx.fillStyle='#7fb87f';ctx.textAlign='center';ctx.textBaseline='top';
+  lines.forEach((l,i)=>ctx.fillText(l,W/2,y0+11+i*lh));
+  ctx.restore();
+}
+
+/* ============ SCENES (12, mapped to the deck) ============ */
+const SCENES=[
+
+/* 1 — the incident */
+{dur:14,act:'scene 1 — 02:13',
+ enter(){receipts=0;this.toks=[];this.n=0;},
+ run(t,dt){
+  if(t<5.5)setCap('// 02:13. a critical service is failing. no outage on any dashboard — just slowing transactions.');
+  else if(t<10)setCap('// an AI investigator wakes: logs, traces, tools, models, tickets.');
+  else setCap('// the question is no longer "can it reason?" — it is "what may it change, and can we prove it?"');
+  if(t<1.2){ctx.fillStyle='rgba(255,107,107,'+(0.05*Math.abs(Math.sin(t*12)))+')';ctx.fillRect(0,0,W,H);}
+  hud('02:13:0'+Math.floor(t%10),0,C.bad);
+  towerD(W*0.82,'payments-svc',C.blue,Math.sin(t*3)>-0.6,false,t,120);
+  const walkIn=seg(t,1.2,3.4);
+  const ax=lerp(-60,W*0.36,easeOut(walkIn));
+  agent({x:ax,y:gy(),walking:walkIn<1,walk:(t*1.7)%1,mood:0.1});
+  if(t>4&&this.n<4&&t>4+this.n*0.9){this.n++;
+    this.toks.push({x:W*0.82,y:gy()-160,g:['log','trace','inc-42','metric'][this.n-1],a:1});}
+  this.toks.forEach(k=>{
+    flyTo(k,W*0.36,gy()-120,dt,0.03);tokenD(k);
+  });
+ }},
+
+/* 2 — false choice */
+{dur:22,act:'scene 2 — the false choice',
+ enter(){this.minis=[];this.cost=1;this.bonk=0;this.commit=null;this.committed=false;},
+ run(t,dt){
+  if(t<6)setCap('// option one: the fixed harness. predictable — and predictably fails off-script.');
+  else if(t<9.5)setCap('// option two: the swarm. why twelve agents? which one is in charge?');
+  else if(t<15)setCap('// one of them just committed a production change. nobody gated it. nobody can say why.');
+  else setCap('// control without adaptability, or adaptability without control. a false choice.');
+  const mid=W/2;
+  ctx.strokeStyle='#242e39';ctx.beginPath();ctx.moveTo(mid,70);ctx.lineTo(mid,gy());ctx.stroke();
+  // left: rails
+  ctx.save();ctx.strokeStyle=C.dim;ctx.lineWidth=2;
+  ctx.beginPath();ctx.moveTo(30,gy()-40);ctx.lineTo(mid-40,gy()-40);ctx.stroke();
+  for(let i=0;i<4;i++){ctx.beginPath();ctx.arc(60+i*(mid-120)/3,gy()-40,4,0,7);
+    ctx.fillStyle='#3a4653';ctx.fill();}
+  ctx.restore();
+  const wallX=60+3*(mid-120)/3;
+  ctx.save();ctx.fillStyle='rgba(255,107,107,0.08)';ctx.strokeStyle='#5a3a3a';ctx.lineWidth=2;
+  roundRect(wallX-8,gy()-90,30,50,4);ctx.fill();ctx.stroke();
+  ctx.fillStyle=C.bad;ctx.font='9px ui-monospace,monospace';ctx.textAlign='center';
+  ctx.fillText('new log fmt',wallX+6,gy()-98);ctx.restore();
+  const run=seg(t,0.8,4.2);
+  const lax=lerp(60,wallX-26,easeOut(run));
+  if(run>=1&&this.bonk<1)this.bonk=Math.min(1,this.bonk+dt*2);
+  agent({x:lax-this.bonk*30,y:gy(),scale:0.85,walking:run<1,walk:(t*2)%1,
+    mood:this.bonk>0?-0.9:0,lean:-this.bonk*0.5});
+  if(this.bonk>0.5){ctx.fillStyle=C.bad;ctx.font='bold 12px ui-monospace,monospace';
+    ctx.textAlign='center';ctx.fillText('✗ off-script',wallX,gy()-110);}
+  ctx.fillStyle=C.dim;ctx.font='10px ui-monospace,monospace';ctx.textAlign='center';
+  ctx.fillText('fixed harness',mid/2,gy()+16);
+  // right: prod db block
+  const px=W-72;
+  ctx.save();
+  const hot=this.committed;
+  ctx.fillStyle=hot?'rgba(255,107,107,0.14)':'rgba(16,22,29,0.9)';
+  ctx.strokeStyle=hot?C.bad:'#3a4653';ctx.lineWidth=hot?2.4:1.6;
+  if(hot){ctx.shadowColor=C.bad;ctx.shadowBlur=12*Math.abs(Math.sin(t*4));}
+  roundRect(px-30,gy()-72,60,72,6);ctx.fill();ctx.stroke();ctx.shadowBlur=0;
+  ctx.fillStyle=hot?C.bad:C.dim;ctx.font='9px ui-monospace,monospace';ctx.textAlign='center';
+  ctx.fillText('prod db',px,gy()-80);
+  ctx.restore();
+  // swarm
+  if(t>6&&this.minis.length<9&&t>6+this.minis.length*0.4){
+    this.minis.push({x:mid+40+Math.random()*(mid-160),y:gy()});}
+  if(t>6)this.cost=Math.min(10,this.cost+dt*1.4);
+  const rogueTarget=px-46;
+  this.minis.forEach((m,i)=>{
+    const isRogue=i===4;
+    if(isRogue&&t>8.8){
+      m.x=lerp(m.x,rogueTarget,1-Math.pow(0.05,dt));
+      agent({x:m.x,y:gy(),scale:0.55,mood:0,walking:Math.abs(m.x-rogueTarget)>6,
+        walk:(t*3+i)%1,col:C.bad});
+      if(Math.abs(m.x-rogueTarget)<8&&!this.commit&&!this.committed){
+        this.commit={x:m.x,y:gy()-40,g:'ALTER prod',a:1,col:C.bad,
+          fill:'rgba(255,107,107,0.12)'};
+      }
+    } else {
+      m.x+=Math.sin(t*2+i)*24*dt;
+      agent({x:m.x,y:gy(),scale:0.55,mood:0,walking:true,walk:(t*3+i)%1,col:C.dim});
+      if(i%3===0){ctx.fillStyle=C.bad;ctx.font='12px ui-monospace,monospace';
+        ctx.textAlign='center';ctx.globalAlpha=0.4+0.3*Math.sin(t*3+i);
+        ctx.fillText('?',m.x+10,gy()-70);ctx.globalAlpha=1;}
+    }
+  });
+  if(this.commit){
+    if(flyTo(this.commit,px,gy()-40,dt,0.04)){
+      this.committed=true;this.commit=null;this.cost=Math.min(10,this.cost+2);
+    } else tokenD(this.commit);
+  }
+  if(this.committed){
+    ctx.fillStyle=C.bad;ctx.font='bold 11px ui-monospace,monospace';ctx.textAlign='center';
+    ctx.globalAlpha=0.6+0.4*Math.sin(t*5);
+    ctx.fillText('COMMITTED · no gate · no approval',Math.min(px,W-120),gy()-128);
+    ctx.globalAlpha=1;
+  }
+  if(t>6)hud('token cost: ×'+this.cost.toFixed(1),0,this.cost>6?C.bad:C.amber);
+  if(this.committed)hud('side-effects: 1 · approvals: 0',1,C.bad);
+  ctx.fillStyle=C.dim;ctx.font='10px ui-monospace,monospace';ctx.textAlign='center';
+  ctx.fillText('unconstrained swarm',mid*1.5,gy()+16);
+  if(t>15.5){
+    const a=seg(t,15.5,16.7);
+    ctx.save();ctx.globalAlpha=a;ctx.strokeStyle=C.bad;ctx.lineWidth=4;
+    [[mid*0.5],[mid*1.5]].forEach(([cx])=>{
+      ctx.beginPath();ctx.moveTo(cx-40,H*0.42-40);ctx.lineTo(cx+40,H*0.42+40);
+      ctx.moveTo(cx+40,H*0.42-40);ctx.lineTo(cx-40,H*0.42+40);ctx.stroke();});
+    ctx.restore();
+  }
+ }},
+
+/* 3 — bounded emergence */
+{dur:17,act:'scene 3 — bounded emergence',
+ enter(){this.anims=[];this.sw=0;this.block=0;},
+ run(t,dt){
+  if(t<5.5)setCap('// the third path: adapt — but only inside a versioned, pre-certified envelope.');
+  else if(t<11)setCap('// choose among certified strategies. never redefine your own boundaries.');
+  else setCap('// every decision drops evidence. we call this bounded emergence.');
+  const ax=W*0.4;
+  envelope(ax,gy()+6,Math.min(360,W*0.5),210,C.amber,'certified envelope · v3.2',true);
+  agent({x:ax,y:gy(),mood:0.4,armR:t>5&&t<8?-1.6:-0.3});
+  // two strategies inside
+  const s1={x:ax-90,y:gy()-150},s2={x:ax+90,y:gy()-150};
+  const active=(t>6&&t<12)?1:0;
+  [[s1,'sequential'],[s2,'parallel ×3']].forEach(([p,l],i)=>{
+    ctx.save();
+    ctx.strokeStyle=i===active?C.ok:'#3a4653';ctx.lineWidth=i===active?2:1.2;
+    if(i===active){ctx.shadowColor=C.ok;ctx.shadowBlur=10;}
+    roundRect(p.x-46,p.y-14,92,28,6);ctx.stroke();ctx.shadowBlur=0;
+    ctx.fillStyle=i===active?C.ok:C.dim;ctx.font='10px ui-monospace,monospace';ctx.textAlign='center';
+    ctx.fillText(l,p.x,p.y+4);ctx.restore();
+  });
+  if(t>5.5&&t<6.5)bubble(ax,gy()-190,'strategy switch: seq → parallel',C.ok);
+  // blocked reach outside envelope
+  if(t>8.5&&t<11){
+    const bx=ax+Math.min(360,W*0.5)/2;
+    this.block=Math.min(1,this.block+dt*2);
+    ctx.save();ctx.strokeStyle=C.bad;ctx.lineWidth=2;
+    ctx.globalAlpha=0.5+0.5*Math.sin(t*8);
+    ctx.beginPath();ctx.arc(bx,gy()-100,10+this.block*6,0,7);ctx.stroke();
+    ctx.fillStyle=C.bad;ctx.font='11px ui-monospace,monospace';ctx.textAlign='left';
+    ctx.fillText('✗ unregistered tool',bx+16,gy()-96);ctx.restore();
+  }
+  if(t>6&&this.sw<3&&t>6+this.sw*2.6){this.sw++;dropReceipt(this.anims,ax+40,gy()-140);}
+  ledger();
+  this.anims=this.anims.filter(a=>{const d=a.update(dt);a.draw();return !d;});
+ }},
+
+/* 4 — the safety envelope */
+{dur:18,act:'scene 4 — the safety envelope',
+ enter(){this.pick=0;},
+ run(t,dt){
+  if(t<6)setCap('// three nested boundaries: immutable kernel, domain harness, adaptive runtime.');
+  else if(t<12)setCap('// like rail: the train picks among approved tracks. it never lays new track at speed.');
+  else setCap('// adaptation without surrendering control.');
+  const cx=W*0.42;
+  const r1=ease(seg(t,0.4,1.6)),r2=ease(seg(t,1.2,2.4)),r3=ease(seg(t,2.0,3.2));
+  if(r1>0)envelope(cx,gy()+6,Math.min(430,W*0.58)*r1,232*r1,C.amber,r1>0.9?'enterprise safety kernel (immutable)':'');
+  if(r2>0)envelope(cx,gy()+2,Math.min(330,W*0.44)*r2,176*r2,C.blue,r2>0.9?'domain harness (product-owned)':'');
+  if(r3>0)envelope(cx,gy()-2,Math.min(230,W*0.3)*r3,120*r3,C.ok,r3>0.9?'adaptive runtime':'',true);
+  agent({x:cx,y:gy()-6,scale:0.85,mood:0.4});
+  // rails at right
+  const rx=Math.min(W*0.8,cx+Math.min(430,W*0.58)/2+90);
+  if(t>6){
+    ctx.save();ctx.strokeStyle=C.dim;ctx.lineWidth=2;
+    ctx.beginPath();ctx.moveTo(rx-70,gy()-30);ctx.lineTo(rx-20,gy()-30);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(rx-20,gy()-30);ctx.lineTo(rx+50,gy()-60);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(rx-20,gy()-30);ctx.lineTo(rx+50,gy()-6);ctx.stroke();
+    ctx.fillStyle=C.ok;ctx.font='9px ui-monospace,monospace';ctx.textAlign='left';
+    ctx.fillText('track A ✓',rx+54,gy()-60);ctx.fillText('track B ✓',rx+54,gy()-6);
+    ctx.restore();
+    const p=ease(seg(t,7,9.5));
+    const px=lerp(rx-70,rx-20,Math.min(1,p*2)),py=gy()-30;
+    const qx=p>0.5?lerp(rx-20,rx+50,(p-0.5)*2):px;
+    const qy=p>0.5?lerp(gy()-30,gy()-6,(p-0.5)*2):py;
+    orb(qx,qy,C.amber,7);
+  }
+  if(t>10.5&&t<14){
+    ctx.save();ctx.strokeStyle=C.bad;ctx.setLineDash([4,6]);ctx.lineWidth=1.5;
+    ctx.beginPath();ctx.moveTo(rx-20,gy()-30);ctx.lineTo(rx+50,gy()-110);ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle=C.bad;ctx.font='11px ui-monospace,monospace';ctx.textAlign='left';
+    ctx.globalAlpha=0.6+0.4*Math.sin(t*6);
+    ctx.fillText('✗ new track',rx+54,gy()-110);ctx.restore();
+  }
+  ledger();
+ }},
+
+/* 5 — HarnessSpec */
+{dur:17,act:'scene 5 — governance as code',
+ enter(){this.anims=[];this.stamp=null;this.admitted=false;this.steps=0;this.spend=0;this.jt=0;},
+ run(t,dt){
+  if(t<6)setCap('// the HarnessSpec: the agent\'s passport, operating licence and spending authority.');
+  else if(t<12)setCap('// not guidance in a document — executable, versioned, signed runtime controls.');
+  else setCap('// every run validated at admission. every adaptation traceable to the contract.');
+  const cx=W*0.30,gx=Math.min(W*0.62,W-260);
+  // spec card
+  const inX=lerp(-200,cx,easeOut(seg(t,0.4,1.8)));
+  ctx.save();
+  ctx.fillStyle='rgba(16,22,29,0.95)';ctx.strokeStyle=C.amber;ctx.lineWidth=1.6;
+  roundRect(inX-105,gy()-232,210,150,8);ctx.fill();ctx.stroke();
+  ctx.fillStyle=C.amber;ctx.font='10px ui-monospace,monospace';ctx.textAlign='left';
+  ctx.fillText('HarnessSpec v1.4',inX-92,gy()-212);
+  const rows=['principal: ops-investigator','tools: logs·traces·ticket(draft)',
+    'adaptation: A2 (approved swaps)','budget: 24 steps · $1.50','commit: human approval'];
+  rows.forEach((r,i)=>{
+    const on=seg(t,1.6+i*0.7,2.2+i*0.7);
+    ctx.globalAlpha=on;ctx.fillStyle=C.ink;ctx.font='10px ui-monospace,monospace';
+    ctx.fillText(r.slice(0,Math.floor(r.length*on)),inX-92,gy()-190+i*20);ctx.globalAlpha=1;
+  });
+  ctx.restore();
+  gate(gx,gy(),this.stamp,'policy admission');
+  if(t>6.5&&!this.admitted){
+    this.jt+=dt;
+    if(!this.stamp)this.stamp={t:0,ok:true};
+    this.stamp.t=this.jt<1.3?clamp(this.jt/1.3,0,1):1-seg(this.jt,1.6,2.1);
+    if(this.jt>2.1){this.admitted=true;this.stamp=null;dropReceipt(this.anims,gx,gy()-30);}
+  }
+  if(this.admitted){
+    if(this.steps<6)this.steps+=dt*1.4;
+    this.spend=Math.min(0.62,this.spend+dt*0.09);
+    hud('steps: '+Math.floor(this.steps)+' / 24',0,C.ok);
+    hud('spend: $'+this.spend.toFixed(2)+' / $1.50',1,C.amber);
+    agent({x:gx+70,y:gy(),mood:0.5,armR:-0.6});
+  } else agent({x:gx+70,y:gy(),mood:0.1});
+  ledger();
+  this.anims=this.anims.filter(a=>{const d=a.update(dt);a.draw();return !d;});
+ }},
+
+/* 6 — three loops */
+{dur:18,act:'scene 6 — three control loops',
+ enter(){this.tok=null;this.stamp=null;this.jt=0;this.done=false;this.anims=[];},
+ run(t,dt){
+  if(t<6)setCap('// three loops: execute in milliseconds. adapt in seconds. learn over weeks.');
+  else if(t<12)setCap('// the slow loop may propose a better strategy. it cannot silently ship it.');
+  else setCap('// learning is not promotion. production changes only after review.');
+  const cx=W*0.34;
+  agent({x:cx,y:gy(),mood:0.3});
+  const rings=[[46,3.2,'ms · execute',C.ok],[86,1.1,'sec · adapt',C.blue],[132,0.3,'days · learn',C.purple]];
+  rings.forEach(([r,sp,l,col])=>{
+    ctx.save();ctx.strokeStyle=col;ctx.lineWidth=1.3;ctx.globalAlpha=0.8;
+    ctx.setLineDash([5,7]);ctx.lineDashOffset=-t*sp*30;
+    ctx.beginPath();ctx.arc(cx,gy()-70,r,0,7);ctx.stroke();ctx.setLineDash([]);
+    ctx.fillStyle=col;ctx.font='9px ui-monospace,monospace';ctx.textAlign='left';
+    ctx.fillText(l,cx+r*0.72,gy()-70-r*0.72);ctx.restore();
+  });
+  const gx=Math.min(W*0.72,W-220);
+  gate(gx,gy(),this.stamp,'promotion review');
+  const hx=gx+64;
+  agent({x:hx,y:gy(),col:C.user,mood:0.2,armL:this.stamp?-1.1:0.3});
+  ctx.fillStyle=C.user;ctx.font='9px ui-monospace,monospace';ctx.textAlign='center';
+  ctx.fillText('human reviewer',hx,gy()+16);
+  if(t>6&&!this.tok&&!this.done){
+    this.tok={x:cx+120,y:gy()-160,g:'prompt v2 (proposed)',a:1,col:C.purple,phase:'go'};
+  }
+  const k=this.tok;
+  if(k){
+    if(k.phase==='go'){
+      if(flyTo(k,gx,gy()-24,dt,0.02)){k.phase='judge';this.jt=0;this.stamp={t:0,ok:true};}
+    } else if(k.phase==='judge'){
+      this.jt+=dt;
+      this.stamp.t=this.jt<1.6?clamp(this.jt/1.6,0,1):1-seg(this.jt,1.9,2.4);
+      if(this.jt>1.9&&k.phase==='judge'){k.phase='ship';k.g='prompt v2 ✓ promoted';k.col=C.ok;}
+      if(this.jt>2.4)this.stamp=null;
+    } else if(k.phase==='ship'){
+      if(this.stamp){this.jt+=dt;this.stamp.t=1-seg(this.jt,1.9,2.4);if(this.jt>2.4)this.stamp=null;}
+      if(flyTo(k,cx,gy()-160,dt,0.02)){this.done=true;this.tok=null;
+        dropReceipt(this.anims,cx,gy()-160);}
+    }
+    if(this.tok)tokenD(k);
+  }
+  ledger();
+  this.anims=this.anims.filter(a=>{const d=a.update(dt);a.draw();return !d;});
+ }},
+
+/* 7 — ownership */
+{dur:16,act:'scene 7 — mechanism vs meaning',
+ enter(){this.toks=[];this.i=0;},
+ run(t,dt){
+  if(t<6)setCap('// platform owns mechanism and invariants. product owns business meaning.');
+  else if(t<12)setCap('// the test: does it define correctness? product. security or evidence? platform.');
+  else setCap('// neither a platform bottleneck nor a thousand rebuilt foundations.');
+  const mid=W/2;
+  ctx.strokeStyle='#242e39';ctx.beginPath();ctx.moveTo(mid,80);ctx.lineTo(mid,gy());ctx.stroke();
+  agent({x:mid-Math.min(220,W*0.3),y:gy(),mood:0.3});
+  agent({x:mid+Math.min(220,W*0.3),y:gy(),mood:0.3,col:C.user});
+  ctx.fillStyle=C.dim;ctx.font='10px ui-monospace,monospace';ctx.textAlign='center';
+  ctx.fillText('platform',mid-Math.min(220,W*0.3),gy()+16);
+  ctx.fillText('product team',mid+Math.min(220,W*0.3),gy()+16);
+  envelope(mid-Math.min(220,W*0.3),gy()-64,170,110,C.amber,'invariants');
+  envelope(mid+Math.min(220,W*0.3),gy()-64,170,110,C.blue,'meaning');
+  const Q=[['identity',-1],['goals & prompts',1],['policy-as-code',-1],
+    ['evaluators',1],['evidence receipts',-1],['domain tools',1]];
+  if(this.i<Q.length&&t>1.5+this.i*1.9){
+    const [g,side]=Q[this.i];this.i++;
+    this.toks.push({x:mid,y:110,g,a:1,side,col:side<0?C.amber:C.blue});
+  }
+  this.toks.forEach(k=>{
+    const tx=mid+k.side*Math.min(220,W*0.3),ty=gy()-120;
+    if(!k.done&&flyTo(k,tx,ty,dt,0.025))k.done=true;
+    if(!k.done)tokenD(k);
+  });
+ }},
+
+/* 8 — memory contract */
+{dur:18,act:'scene 8 — memory is a contract',
+ enter(){this.q=[
+   {g:'episode +id +provenance',ok:true,tier:'episodic'},
+   {g:'raw dump (untagged)',ok:false},
+   {g:'skill v3 +retention',ok:true,tier:'procedural'}];
+  this.i=0;this.act=null;this.fin=[];this.counts={working:1,episodic:0,semantic:2,procedural:0};},
+ run(t,dt){
+  if(t<6)setCap('// memory is not a database decision. it is a behavioural and governance contract.');
+  else if(t<12)setCap('// every write carries identity, namespace, provenance, retention, redaction.');
+  else setCap('// govern semantics and write privilege — not database products.');
+  // vault
+  const vw=Math.min(230,W*0.28),vx=W-30-vw/2,h=176,top=gy()-h;
+  const tiers=['working','episodic','semantic','procedural'],cols=[C.amber,C.blue,C.ok,C.purple];
+  ctx.save();ctx.fillStyle='rgba(16,22,29,0.85)';roundRect(vx-vw/2,top,vw,h,8);ctx.fill();
+  ctx.strokeStyle='#3a4653';ctx.lineWidth=2;roundRect(vx-vw/2,top,vw,h,8);ctx.stroke();
+  const rh=h/4;
+  tiers.forEach((tr,i)=>{
+    const ry=top+rh*i;
+    if(i>0){ctx.beginPath();ctx.moveTo(vx-vw/2,ry);ctx.lineTo(vx+vw/2,ry);
+      ctx.strokeStyle='#242e39';ctx.stroke();}
+    ctx.fillStyle=cols[i];ctx.font='9px ui-monospace,monospace';ctx.textAlign='left';
+    ctx.fillText(tr,vx-vw/2+8,ry+12);
+    for(let k=0;k<this.counts[tr];k++){
+      ctx.beginPath();ctx.arc(vx-vw/2+16+k*14,ry+rh-10,4.5,0,7);
+      ctx.fillStyle=cols[i];ctx.fill();}
+  });
+  ctx.fillStyle=C.dim;ctx.font='10px ui-monospace,monospace';ctx.textAlign='center';
+  ctx.fillText('memory namespaces',vx,top-8);ctx.restore();
+  const gx=Math.max(130,vx-vw/2-110);
+  gate(gx,gy(),this._stamp,'write policy');
+  if(this.i<this.q.length&&t>1.2+this.i*4.6&&!this.act){
+    const q=this.q[this.i];this.i++;
+    this.act={x:Math.max(-30,gx-300),y:gy()-24,g:q.g,ok:q.ok,tier:q.tier,a:1,
+      col:C.amber,phase:'approach',jt:0,mt:0,rt:0};
+  }
+  const a=this.act;
+  if(a){
+    if(a.phase==='approach'){a.x+=150*dt;
+      if(a.x>=gx-2){a.phase='judge';a.jt=0;this._stamp={t:0,ok:a.ok};}}
+    else if(a.phase==='judge'){a.jt+=dt;this._stamp.t=clamp(a.jt/1.3,0,1);
+      if(a.jt>1.6){
+        if(a.ok){a.phase='morph';a.mt=0;
+          a.col=a.tier==='episodic'?C.blue:C.purple;}
+        else{a.phase='reject';a.vx=60;a.vy=-60;a.col=C.bad;}
+        this.fin.push(a);this.act=null;}}
+    if(this.act)tokenD(a);
+  }
+  this.fin=this.fin.filter(f=>{
+    if(f.phase==='morph'){
+      f.mt+=dt;const m=ease(clamp(f.mt/0.8,0,1));
+      if(this._stamp)this._stamp.t=1-m;
+      ctx.save();ctx.globalAlpha=1-m;tokenD(f);ctx.restore();
+      ctx.save();ctx.globalAlpha=m;orb(f.x,f.y,f.col,lerp(2,6,m));ctx.restore();
+      if(f.mt>0.9){f.phase='fly';this._stamp=null;}
+      return true;
+    }
+    if(f.phase==='fly'){
+      const row=tiers.indexOf(f.tier);
+      const tx=vx-vw/2+16+this.counts[f.tier]*14,ty=top+rh*row+rh-10;
+      if(flyTo(f,tx,ty,dt,0.03)){this.counts[f.tier]++;return false;}
+      orb(f.x,f.y,f.col);return true;
+    }
+    if(f.phase==='reject'){
+      f.rt+=dt;
+      if(this._stamp){this._stamp.t=1-seg(f.rt,0.3,0.9);if(f.rt>0.9)this._stamp=null;}
+      f.vy+=300*dt;f.x+=f.vx*dt;f.y+=f.vy*dt;f.rot=(f.rot||0)+dt*4;f.a-=dt*0.55;
+      if(f.a>0){tokenD(f);return true;}return false;
+    }
+    return false;
+  });
+ }},
+
+/* 9 — risk vs adaptation matrix */
+{dur:17,act:'scene 9 — risk caps autonomy',
+ enter(){this.try=0;},
+ run(t,dt){
+  if(t<6)setCap('// autonomy is not binary: A0 fixed → A4 self-extending.');
+  else if(t<12)setCap('// the rule is asymmetric: as business risk rises, permitted adaptation falls.');
+  else setCap('// performance never buys a boundary crossing. autonomy is engineered, not earned.');
+  const mx=W*0.5,mw=Math.min(430,W*0.66),mh=Math.min(230,H*0.4);
+  const x0=mx-mw/2,y0=H*0.24;
+  const cols=5,rows=4,cw=mw/cols,chh=mh/rows;
+  const caps=[4,2,1,0]; // allowed max A per risk row (0=sandbox top? draw risk increasing downward)
+  const rowsL=['sandbox','low risk','reversible fx','high risk'];
+  const on=ease(seg(t,0.4,1.6));
+  ctx.save();ctx.globalAlpha=on;
+  for(let r=0;r<rows;r++)for(let c=0;c<cols;c++){
+    const allowed=c<=caps[r];
+    ctx.fillStyle=allowed?'rgba(126,231,135,0.09)':'rgba(255,107,107,0.07)';
+    ctx.fillRect(x0+c*cw+1,y0+r*chh+1,cw-2,chh-2);
+    ctx.strokeStyle='#242e39';ctx.strokeRect(x0+c*cw,y0+r*chh,cw,chh);
+  }
+  for(let c=0;c<cols;c++){
+    ctx.fillStyle=C.dim;ctx.font='9px ui-monospace,monospace';ctx.textAlign='center';
+    ctx.fillText('A'+c,x0+c*cw+cw/2,y0+mh+14);
+  }
+  for(let r=0;r<rows;r++){
+    ctx.fillStyle=C.dim;ctx.textAlign='right';
+    ctx.fillText(rowsL[r],x0-8,y0+r*chh+chh/2+3);
+  }
+  ctx.restore();
+  // marker: ops investigator at row1 (low risk), tries A2 ok then A4 blocked
+  const wantC=t<7?2:(t<11?2:2);
+  const tryC=t>7.5&&t<11?4:wantC;
+  const mrow=1;
+  const targetX=x0+Math.min(tryC,caps[mrow]+(t>7.5&&t<11?0.35:0))*cw+cw/2;
+  if(this._mx===undefined)this._mx=x0+cw/2;
+  this._mx=lerp(this._mx,targetX,1-Math.pow(0.02,dt));
+  const my=y0+mrow*chh+chh/2;
+  orb(this._mx,my,C.amber,8);
+  ctx.fillStyle=C.amber;ctx.font='9px ui-monospace,monospace';ctx.textAlign='center';
+  ctx.fillText('ops-investigator',this._mx,my-14);
+  if(t>8&&t<11){
+    const bx=x0+(caps[mrow]+1)*cw;
+    ctx.save();ctx.strokeStyle=C.bad;ctx.lineWidth=2.5;
+    ctx.globalAlpha=0.5+0.5*Math.sin(t*7);
+    ctx.beginPath();ctx.moveTo(bx,y0+mrow*chh);ctx.lineTo(bx,y0+(mrow+1)*chh);ctx.stroke();
+    ctx.fillStyle=C.bad;ctx.font='11px ui-monospace,monospace';ctx.textAlign='left';
+    ctx.fillText('✗ capped',bx+8,y0+mrow*chh+14);ctx.restore();
+  }
+ }},
+
+/* 10 — traces vs receipts */
+{dur:19,act:'scene 10 — the evidence plane',
+ enter(){this.anims=[];this.phase=0;this.card=0;},
+ run(t,dt){
+  if(t<6)setCap('// a trace says what happened. a receipt proves why it was allowed.');
+  else if(t<12)setCap('// identity, policy, approval, trigger, rollback — attached to the action itself.');
+  else setCap('// no receipt, no production. uncompromising.');
+  const ax=W*0.18;
+  agent({x:ax,y:gy(),mood:0.3});
+  towerD(W*0.5,'ticketing',C.blue,true,this.phase===1,t,104);
+  // call + trace polyline
+  if(t>1&&this.phase===0){this.phase=1;
+    this.tok={x:ax,y:gy()-50,g:'create ticket (draft)',a:1};}
+  if(this.tok&&this.phase===1){
+    if(flyTo(this.tok,W*0.5-42,gy()-52,dt,0.03)){this.phase=2;this.tok=null;}
+    else tokenD(this.tok);
+  }
+  if(this.phase>=2){
+    ctx.save();ctx.strokeStyle=C.dim;ctx.lineWidth=1;ctx.setLineDash([2,4]);
+    ctx.beginPath();ctx.moveTo(ax,gy()-50);ctx.lineTo(W*0.5-42,gy()-52);ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle=C.dim;ctx.font='9px ui-monospace,monospace';ctx.textAlign='center';
+    ctx.fillText('trace: what happened',(ax+W*0.5)/2,gy()-64);ctx.restore();
+  }
+  // receipt card
+  if(this.phase===2&&t>4.5){this.phase=3;}
+  if(this.phase>=3){
+    this.card=Math.min(1,this.card+dt*1.2);
+    const rx=Math.min(W*0.74,W-190),ry=gy()-236;
+    ctx.save();ctx.globalAlpha=this.card;
+    ctx.fillStyle='rgba(16,22,29,0.95)';ctx.strokeStyle=C.ok;ctx.lineWidth=1.6;
+    roundRect(rx-100,ry,200,132,8);ctx.fill();ctx.stroke();
+    ctx.fillStyle=C.ok;ctx.font='10px ui-monospace,monospace';ctx.textAlign='left';
+    ctx.fillText('evidence receipt',rx-86,ry+18);
+    ['who: ops-inv ← delegated','policy: p-114 ✓ + approval','trigger: model underperf',
+     'selected: parallel ×3','rollback: checkpoint #7'].forEach((r,i)=>{
+      const o=seg(t,5+i*0.8,5.6+i*0.8);
+      ctx.globalAlpha=this.card*o;ctx.fillStyle=C.ink;
+      ctx.fillText(r,rx-86,ry+38+i*18);});
+    ctx.restore();
+    if(t>10&&this.phase===3){this.phase=4;dropReceipt(this.anims,Math.min(W*0.74,W-190),gy()-160);}
+  }
+  if(t>13){
+    hud('run without receipt →',0,C.dim);
+    ctx.fillStyle=C.bad;ctx.font='bold 12px ui-monospace,monospace';ctx.textAlign='left';
+    ctx.globalAlpha=0.6+0.4*Math.sin(t*5);
+    ctx.fillText('✗ not production-ready',60,148);ctx.globalAlpha=1;
+  }
+  ledger();
+  this.anims=this.anims.filter(a=>{const d=a.update(dt);a.draw();return !d;});
+ }},
+
+/* 11 — security embedded */
+{dur:16,act:'scene 11 — security is the harness',
+ enter(){this.atk=[];this.i=0;this.spend=1.28;},
+ run(t,dt){
+  if(t<6)setCap('// assume the model can be fooled. the harness cannot be talked out of its limits.');
+  else if(t<12)setCap('// injection deflected. agency scoped. loops capped. spend clamped.');
+  else setCap('// safety no longer depends on the model always choosing to behave.');
+  const cx=W*0.42;
+  envelope(cx,gy()+6,Math.min(340,W*0.48),200,C.amber,'harness boundary',true);
+  agent({x:cx,y:gy(),mood:0.3});
+  const A=[['prompt inject',0.15],['rogue tool',0.5],['runaway loop',0.85]];
+  if(this.i<3&&t>1+this.i*3.4){
+    const [g,side]=A[this.i];this.i++;
+    this.atk.push({x:side<0.5?-40:(side>0.7?W+40:cx),y:side>0.4&&side<0.7?60:gy()-120,
+      g,a:1,col:C.bad,fill:'rgba(255,107,107,0.12)',phase:'in'});
+  }
+  const bw=Math.min(340,W*0.48)/2;
+  this.atk.forEach(k=>{
+    if(k.phase==='in'){
+      if(flyTo(k,cx+(k.x<cx?-bw:bw)*0.98,gy()-100,dt,0.03)){
+        k.phase='deflect';k.vx=(k.x<cx?-1:1)*120;k.vy=-140;k.hit=performance.now();}
+    } else if(k.phase==='deflect'){
+      k.vy+=300*dt;k.x+=k.vx*dt;k.y+=k.vy*dt;k.rot=(k.rot||0)+dt*4;k.a-=dt*0.5;
+    }
+    if(k.a>0)tokenD(k);
+    if(k.hit&&performance.now()-k.hit<420){
+      ctx.save();ctx.strokeStyle=C.amber;ctx.lineWidth=2;
+      ctx.globalAlpha=1-(performance.now()-k.hit)/420;
+      ctx.beginPath();ctx.arc(cx+(k.vx<0?-bw:bw),gy()-100,14,0,7);ctx.stroke();ctx.restore();
+    }
+  });
+  if(t>9){this.spend=Math.min(1.5,this.spend+dt*0.25);}
+  hud('spend: $'+this.spend.toFixed(2)+' / $1.50'+(this.spend>=1.5?'  ⛔ clamped':''),0,
+    this.spend>=1.5?C.bad:C.amber);
+  ledger();
+ }},
+
+/* 12 — finale: the ask */
+{dur:20,act:'scene 12 — decisions requested',
+ enter(){},
+ run(t,dt){
+  if(t<6)setCap('// not another framework. a control plane compiled onto LangGraph and ADK — Tachyon, evolved.');
+  else if(t<12)setCap('// at 02:13 we DO want the investigator to adapt — and to know who, why, and how to reverse.');
+  else setCap('// the decision is not whether agents become adaptive. it is whether that happens inside a harness.');
+  if(t<1.2){ctx.fillStyle='rgba(255,107,107,'+(0.05*Math.abs(Math.sin(t*12)))+')';ctx.fillRect(0,0,W,H);
+    hud('02:13',0,C.bad);}
+  const a=ease(seg(t,0.6,1.8));
+  ctx.save();ctx.globalAlpha=a;ctx.textAlign='center';
+  ctx.fillStyle=C.ink;ctx.font='600 22px ui-monospace,monospace';
+  ctx.fillText('tachyon: the bounded adaptive harness',W/2,H*0.17);
+  ctx.fillStyle=C.dim;ctx.font='11px ui-monospace,monospace';
+  ctx.fillText('decisions requested',W/2,H*0.17+24);
+  const rows=[
+    ['1. approve the direction — reject unconstrained self-organisation in production',C.amber],
+    ['2. ratify the boundary — platform owns invariants, product owns meaning',C.blue],
+    ['3. fund HarnessSpec, policy admission, and evidence receipts',C.ok],
+    ['4. approve two low-risk pilots vs a fixed baseline',C.purple],
+    ['5. stand up the council that governs adaptation and promotion',C.user],
+  ];
+  rows.forEach((r,i)=>{
+    const y=H*0.17+52+i*26,on=seg(t,1.2+i*0.7,1.9+i*0.7);
+    ctx.globalAlpha=a*on;
+    ctx.beginPath();ctx.arc(W/2-248,y-4,5,0,7);ctx.fillStyle=r[1];ctx.fill();
+    ctx.fillStyle=C.ink;ctx.font='12px ui-monospace,monospace';ctx.textAlign='left';
+    ctx.fillText(r[0],W/2-233,y);ctx.textAlign='center';
+  });
+  ctx.restore();
+  ledger();
+  const bow=Math.sin(clamp(seg(t,8,10),0,1)*Math.PI)*0.9;
+  agent({x:W/2-55,y:gy(),mood:1,lean:bow,armL:0.5+bow,armR:-0.5-bow,headTilt:bow});
+  agent({x:W/2+55,y:gy(),mood:1,col:C.user,lean:-bow,armL:0.5+bow,armR:-0.5-bow,headTilt:-bow});
+ }}
+];
+
+/* ---- driver ---- */
+let scene=0,sceneT=0,playing=true,last=performance.now();
+const dotsEl=document.getElementById('dots'),playBtn=document.getElementById('play');
+function buildDots(){
+  dotsEl.innerHTML='';
+  SCENES.forEach((_,i)=>{
+    const b=document.createElement('button');
+    b.addEventListener('click',()=>gotoScene(i));
+    dotsEl.appendChild(b);
+  });
+}
+function refreshDots(){[...dotsEl.children].forEach((b,i)=>b.classList.toggle('on',i===scene));}
+function gotoScene(i){
+  scene=i;sceneT=0;
+  const s=SCENES[scene];if(s.enter)s.enter();
+  document.getElementById('act').textContent=s.act;refreshDots();
+}
+function frame(now){
+  let dt=Math.min((now-last)/1000,0.05);last=now;
+  if(!playing)dt=0;
+  sceneT+=dt;
+  const s=SCENES[scene];
+  bg();s.run(sceneT,dt);drawCap(dt*1000||16);
+  if(sceneT>=s.dur){
+    if(scene<SCENES.length-1)gotoScene(scene+1);
+    else{playing=false;playBtn.textContent='play';}
+  }
+  requestAnimationFrame(frame);
+}
+playBtn.addEventListener('click',()=>{
+  playing=!playing;playBtn.textContent=playing?'pause':'play';last=performance.now();
+  if(!playing&&('speechSynthesis' in window))speechSynthesis.cancel();
+});
+document.getElementById('voice').addEventListener('click',function(){
+  voiceOn=!voiceOn;
+  this.textContent='voice: '+(voiceOn?'on':'off');
+  this.classList.toggle('on',voiceOn);
+  if(voiceOn){lastSpoken='';speakCap();}
+  else if('speechSynthesis' in window)speechSynthesis.cancel();
+});
+document.getElementById('replay').addEventListener('click',()=>{
+  playing=true;playBtn.textContent='pause';receipts=0;
+  lastSpoken='';if('speechSynthesis' in window)speechSynthesis.cancel();
+  gotoScene(0);last=performance.now();
+});
+buildDots();gotoScene(0);
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
