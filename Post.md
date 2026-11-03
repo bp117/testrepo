@@ -1,21 +1,23 @@
-A new chapter. New opportunities. The same passion for engineering and innovation.
+New Chapter. Bigger Possibilities. A Commitment to Engineering Excellence.
 
-I'm delighted to share that I've joined The Hartford India as Senior Director – AI-First Engineering Excellence!
+I’m pleased to share that I have joined The Hartford India as Senior Director – AI-First Engineering Excellence.
 
-Joining an organization with over 200 years of legacy, built on trust, resilience, and a strong people-first culture, makes this opportunity particularly meaningful.
+Throughout my career, one belief has remained constant: meaningful transformation happens when technology ambition meets engineering discipline, bold thinking, and empowered teams.
 
-What excites me most is the opportunity to help shape the future of software engineering through an AI-first mindset—where AI is not just a productivity tool but a catalyst for reimagining how we design, build, deliver, and continuously improve technology. I look forward to collaborating with talented teams to drive engineering excellence, responsible AI adoption, and measurable business impact.
+As AI reshapes the technology landscape, I believe the opportunity ahead goes far beyond productivity gains. It is about fundamentally reimagining how we engineer software, make decisions, foster innovation, and deliver value at scale.
 
-As I begin this new chapter, I carry immense gratitude for the journey that brought me here.
+I’m excited to be part of The Hartford India’s journey, bringing this perspective to an organization with a remarkable legacy and a strong commitment to its people and customers.
 
-My time at Wells Fargo has been an incredibly rewarding chapter of learning, innovation, and meaningful relationships. A heartfelt thank you to Chintan Mehta, Harish Mohan, and Suresh Reddy for your leadership, trust, guidance, and encouragement. To my colleagues, teams, and friends at Wells Fargo, thank you for the collaboration, shared achievements, and memories. You have all contributed to shaping the leader and engineer I am today.
+Every new chapter is built on the foundations of the previous one.
 
-A warm welcome makes every new beginning special.
+My journey at Wells Fargo has been instrumental in shaping my leadership perspective. My sincere gratitude to Chintan Mehta, Harish Mohan, and Suresh Reddy for their trust, guidance, and support. To the exceptional colleagues and teams I have worked alongside, thank you for the challenges we embraced, the innovations we brought to life, and the relationships that extend well beyond an organization.
 
-My sincere thanks to Surya Thammiraju and Sireesha for the warm welcome, insightful conversations, and encouragement. A special appreciation to Suryakala, Manoj, Chandramouli, Vishal, Karthik, and the entire onboarding team for making the transition so seamless and welcoming.
+At The Hartford India, my thanks to Surya and Sireesha for the warm welcome and engaging conversations. I also appreciate Suryakalla, Manoj, Chandramouli, Vishal, Karthik, and the broader team for making this transition so welcoming and seamless.
 
-I am excited to learn, collaborate, challenge conventional thinking, and contribute to the journey ahead.
+Leadership, to me, is about creating the conditions where people, ideas, and technology come together to achieve what once seemed impossible.
 
-Here's to building what comes next—with purpose, curiosity, and excellence! 🚀
+Looking forward to collaborating with talented minds, challenging conventional thinking, and helping shape the next chapter of AI-first engineering.
 
-#TheHartfordIndia #IWork4TheHartford #AIFirst #EngineeringExcellence #Leadership #NewBeginnings
+The future of engineering isn't just about what AI can do. It's about what we choose to make possible with it.
+
+#TheHartfordIndia #IWork4TheHartford #AIFirstEngineering #EngineeringExcellence #Leadership
